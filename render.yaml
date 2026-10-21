@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: ifb-pending-call-bot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    # ONE worker only: conversation state is kept in memory
+    startCommand: gunicorn -w 1 --threads 4 -b 0.0.0.0:$PORT --timeout 120 bot:app
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.3
+      - key: WHATSAPP_TOKEN
+        sync: false
+      - key: WHATSAPP_PHONE_ID
+        sync: false
+      - key: VERIFY_TOKEN
+        sync: false
+      - key: ALLOWED_NUMBERS
+        sync: false
