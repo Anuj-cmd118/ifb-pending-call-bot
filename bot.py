@@ -152,6 +152,28 @@ def handle(msg):
 def health():
     return "ok", 200          # used by the uptime pinger to keep the free host awake
 
+@app.get("/privacy")
+def privacy():
+    contact = os.environ.get("CONTACT_EMAIL", "the developer of this bot")
+    return f"""<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy Policy - Pending Call Bot</title></head>
+<body style="font-family:sans-serif;max-width:700px;margin:40px auto;padding:0 16px;line-height:1.6">
+<h1>Privacy Policy</h1>
+<p>The Pending Call Bot is an internal tool that turns a pending-call Excel report sent
+over WhatsApp into a summary image.</p>
+<h2>What we receive</h2>
+<p>Your WhatsApp number, the messages you send to the bot, and the Excel file you upload.</p>
+<h2>How it is used</h2>
+<p>The file is processed in memory only to create the report image and is not saved to disk
+or shared with anyone. Session data is deleted after the report is sent or when the service restarts.</p>
+<h2>Sharing</h2>
+<p>We do not sell or share your data. Messages pass through Meta's WhatsApp Business Platform,
+which has its own privacy policy.</p>
+<h2>Contact</h2>
+<p>Questions or deletion requests: {contact}.</p>
+</body></html>""", 200
+
 @app.get("/webhook")
 def verify():
     if request.args.get("hub.verify_token") == VERIFY_TOKEN:
