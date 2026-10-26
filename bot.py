@@ -17,6 +17,7 @@ import requests
 from dotenv import load_dotenv
 from flask import Flask, request
 
+import insights as ins
 import report_engine as eng
 
 load_dotenv()
@@ -70,11 +71,18 @@ def download_media(media_id) -> bytes:
 
 
 # ------------------------------------------------------------ conversation
-def ask_age(to):
-    send_buttons(to, "Got the file. Show calls pending for:",
+def ask_action(to):
+    send_buttons(to, "Got the pending call file. What do you need?",
+                 [("act_pivot", "Executive pivot"), ("act_chase", "Chase list"),
+                  ("act_exec", "By executive")])
+
+def ask_age(to, action):
+    body = {"chase": "Chase list: calls past SLA, ranked by priority. Which age counts as breached?",
+            "exec": "Franchise-wise report for one executive. Show calls pending for:"
+            }.get(action, "Show calls pending for:")
+    send_buttons(to, body,
                  [("age_2", "More than 2 days"), ("age_3", "More than 3 days"),
                   ("age_custom", "Other / custom")])
-    # (3 buttons max. Add 'more than 5' via custom.)
 
 def ask_types(to, s):
     send_buttons(to, f"Calls older than {s['min_days']} days. Apply the standard filters?\n\n"
@@ -86,12 +94,56 @@ def generate(to, s):
     send_text(to, "Generating your report...")
     png, summary = eng.make_report(s["file"], s["min_days"],
                                    standard_filters=(s["filters"] == "filt_std"))
-    if png is None:
-        send_text(to, summary)
+    send_image(to, png, summary) if png else send_text(to, summary)
+    finish(to)
+
+def generate_chase(to, s):
+    send_text(to, "Building your chase list...")
+    df = eng.load_report(s["file"])
+    top, breach = ins.build_chase_list(df, s["min_days"])
+    if top is None:
+        send_text(to, f"No calls older than {s['min_days']} days after the standard filters.")
     else:
-        send_image(to, png, summary)
+        send_image(to, ins.render_chase_list(top, s["min_days"], len(breach)),
+                   ins.chase_summary(breach, ins.CHASE_TOP_N, s["min_days"]))
+    finish(to)
+
+def generate_csat(to, s):
+    send_text(to, "Building the franchise CSAT scorecard...")
+    png, summary = ins.csat_scorecard(s["file"])
+    send_image(to, png, summary)
+    finish(to)
+
+def ask_executive(to, s):
+    ex = eng.list_executives(s["file"], s["min_days"])
+    if ex.empty:
+        send_text(to, f"No calls older than {s['min_days']} days after the standard filters.")
+        finish(to)
+        return
+    s["exec_names"] = list(ex.index)[:10]
+    rows = [(f"exec_{i}", n.title()[:24], f"{int(ex[n])} calls past {s['min_days']} days")
+            for i, n in enumerate(s["exec_names"])]
+    s["stage"] = "exec"
+    send_list(to, "Which executive? Pick one, or type a name.", "Choose executive", rows)
+
+def generate_exec(to, s, name):
+    send_text(to, f"Building {name.title()}'s franchise-wise report...")
+    png, summary = eng.make_report(s["file"], s["min_days"], executive=name)
+    send_image(to, png, summary + "\n(standard filters applied)") if png else send_text(to, summary)
+    finish(to)
+
+def finish(to):
     send_text(to, "Send another Excel any time, or type *hi* to start over.")
     sessions.pop(to, None)
+
+def after_age(to, s):
+    s["stage"] = "types"
+    if s.get("action") == "chase":
+        generate_chase(to, s)
+    elif s.get("action") == "exec":
+        ask_executive(to, s)
+    else:
+        ask_types(to, s)
 
 def handle(msg):
     to = msg["from"]
@@ -101,7 +153,7 @@ def handle(msg):
     s = sessions.setdefault(to, {"stage": "idle"})
     kind = msg["type"]
 
-    # ---- Excel received
+    # ---- Excel received: detect which report it is
     if kind == "document":
         doc = msg["document"]
         name = (doc.get("filename") or "").lower()
@@ -109,14 +161,26 @@ def handle(msg):
             send_text(to, "Please send the Excel file (.xlsx) downloaded from the portal.")
             return
         try:
-            s["file"] = download_media(doc["id"])
-            eng.load_report(s["file"])                   # validate now, not later
+            data = download_media(doc["id"])
+            rtype = ins.detect_report_type(data)
+            if rtype == "pending":
+                eng.load_report(data)                     # validate now, not later
         except Exception as e:
             send_text(to, f"I couldn't read that file: {e}")
             sessions.pop(to, None)
             return
-        s["stage"] = "age"
-        ask_age(to)
+        s.clear(); s.update({"file": data, "rtype": rtype})
+        if rtype == "pending":
+            s["stage"] = "action"; ask_action(to)
+        elif rtype == "csat":
+            generate_csat(to, s)
+        elif rtype == "registered":
+            send_text(to, "I recognise this as the *Calls Registered* report. I can't summarise it yet - "
+                          "tell the developer what you want from it and it will be added next.")
+            sessions.pop(to, None)
+        else:
+            send_text(to, "I don't recognise this file. Send the *Pending call* or *Customer satisfaction score* Excel.")
+            sessions.pop(to, None)
         return
 
     # ---- button / list replies
@@ -128,21 +192,35 @@ def handle(msg):
 
     if text.lower() in ("hi", "hello", "menu", "start", "cancel"):
         sessions.pop(to, None)
-        send_text(to, "Hi! Send me the *Pending call* Excel from the portal and I'll make the report image.")
+        send_text(to, "Hi! Send me the *Pending call* or *Customer satisfaction score* Excel from the portal.")
         return
 
-    if s["stage"] == "age" and reply in ("age_2", "age_3"):
-        s["min_days"] = int(reply[-1]); s["stage"] = "types"; ask_types(to, s)
+    if s["stage"] == "action" and reply in ("act_pivot", "act_chase", "act_exec"):
+        s["action"] = {"act_pivot": "pivot", "act_chase": "chase", "act_exec": "exec"}[reply]
+        s["stage"] = "age"; ask_age(to, s["action"])
+    elif s["stage"] == "age" and reply in ("age_2", "age_3"):
+        s["min_days"] = int(reply[-1]); after_age(to, s)
     elif s["stage"] == "age" and reply == "age_custom":
         s["stage"] = "age_number"
         send_text(to, "Type the number of days. e.g. *5* means calls pending more than 5 days.")
     elif s["stage"] == "age_number" and text.isdigit():
-        s["min_days"] = int(text); s["stage"] = "types"; ask_types(to, s)
+        s["min_days"] = int(text); after_age(to, s)
+    elif s["stage"] == "exec" and reply and reply.startswith("exec_"):
+        generate_exec(to, s, s["exec_names"][int(reply.split("_")[1])])
+    elif s["stage"] == "exec" and text:
+        q = text.lower()
+        names = [n for n in eng.list_executives(s["file"], s["min_days"]).index if q in n.lower()]
+        if len(names) == 1:
+            generate_exec(to, s, names[0])
+        elif names:
+            send_text(to, "More than one match: " + ", ".join(n.title() for n in names) + ". Type a fuller name.")
+        else:
+            send_text(to, f"No executive matching '{text}' has calls older than {s['min_days']} days. Try another name.")
     elif s["stage"] == "types" and reply in ("filt_std", "filt_none"):
         s["filters"] = reply
         generate(to, s)
     elif s["stage"] == "idle":
-        send_text(to, "Send me the *Pending call* Excel file to get started.")
+        send_text(to, "Send me the *Pending call* or *Customer satisfaction score* Excel to get started.")
     else:
         send_text(to, "Please use the options above, or type *hi* to start over.")
 
