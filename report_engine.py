@@ -51,6 +51,9 @@ def load_report(source) -> pd.DataFrame:
     df = df.dropna(subset=[COL_DAYS])
     df[COL_DAYS] = df[COL_DAYS].astype(int)
     df[COL_EXEC] = df[COL_EXEC].fillna("UNASSIGNED").astype(str).str.strip()
+    # The portal repeats a ticket once per spare-part line, so count each ticket once.
+    if "Ticket No" in df.columns:
+        df = df.drop_duplicates(subset="Ticket No", keep="first")
     return df
 
 
@@ -71,7 +74,8 @@ def call_types(df) -> list:
 
 # ------------------------------------------------------------------- logic
 def build_pivot(df, min_days=3, call_type_filter=None, status_filter=None,
-                max_days=None, cap_days=30, exclude_types=None, exclude_reasons=None):
+                max_days=None, cap_days=30, exclude_types=None, exclude_reasons=None,
+                index_col=COL_EXEC):
     """
     min_days: keep calls with DAYS OLD  >  min_days   ("more than 3 days")
     max_days: optional upper limit (inclusive)
@@ -94,7 +98,7 @@ def build_pivot(df, min_days=3, call_type_filter=None, status_filter=None,
     if d.empty:
         return None
     days = d[COL_DAYS].where(d[COL_DAYS] <= cap_days, cap_days + 1) if cap_days else d[COL_DAYS]
-    pv = pd.crosstab(d[COL_EXEC], days)
+    pv = pd.crosstab(d[index_col], days)
     pv.columns.name = None
     pv.index.name = None
     if cap_days and (cap_days + 1) in pv.columns:      # tail bucket e.g. "30+"
@@ -125,10 +129,10 @@ def _excel_3_colour_scale(values):
     return out
 
 
-def render_image(pv: pd.DataFrame, title: str = "") -> bytes:
+def render_image(pv: pd.DataFrame, title: str = "", row_label: str = "Row Labels") -> bytes:
     """Draws the pivot like the Excel screenshot and returns PNG bytes."""
     body = pv.iloc[:-1]
-    cols = ["Row Labels"] + [str(c) for c in pv.columns[:-1]] + ["Grand Total"]
+    cols = [row_label] + [str(c) for c in pv.columns[:-1]] + ["Grand Total"]
     n_rows, n_cols = len(pv) + 1, len(cols)
 
     name_w = max(3.6, 0.13 * max(len(s) for s in pv.index) + 0.6)
@@ -179,23 +183,44 @@ def render_image(pv: pd.DataFrame, title: str = "") -> bytes:
     return buf.getvalue()
 
 
+def list_executives(source, min_days=3, standard_filters=True):
+    """Executives who have calls older than min_days, most calls first (pandas Series)."""
+    df = load_report(source) if isinstance(source, (bytes, bytearray, str)) else source
+    pv = build_pivot(df, min_days,
+                     exclude_types=STD_EXCLUDE_TYPES if standard_filters else None,
+                     exclude_reasons=STD_EXCLUDE_REASONS if standard_filters else None)
+    if pv is None:
+        return pd.Series(dtype=int)
+    return pv["Grand Total"].drop("Grand Total")
+
+
 def make_report(source, min_days=3, standard_filters=True, call_type_filter=None,
-                status_filter=None, max_days=None):
+                status_filter=None, max_days=None, executive=None):
     """One-call helper used by the bot. Returns (png_bytes | None, summary_text).
     standard_filters=True applies the IFB exclusions (courtesy visit, dealer
-    defective, soft-closure / cancellation verification)."""
+    defective, soft-closure / cancellation verification).
+    executive="CHENDRA C" -> that executive's calls, broken down FRANCHISE-wise."""
     df = load_report(source)
+    index_col = COL_EXEC
+    if executive:
+        df = df[df[COL_EXEC].str.lower() == executive.strip().lower()]
+        index_col = "Franchise Name"
     ex_t = STD_EXCLUDE_TYPES if standard_filters else None
     ex_r = STD_EXCLUDE_REASONS if standard_filters else None
     pv = build_pivot(df, min_days, call_type_filter, status_filter, max_days,
-                     exclude_types=ex_t, exclude_reasons=ex_r)
+                     exclude_types=ex_t, exclude_reasons=ex_r, index_col=index_col)
+    who = f" for {executive.title()}" if executive else ""
     if pv is None:
-        return None, f"No calls found that are more than {min_days} days old with those filters."
+        return None, f"No calls found that are more than {min_days} days old{who} with those filters."
     age = f"more than {min_days} days old"
-    title = f"Pending calls - {age}" + ("" if standard_filters else " (no filters)")
-    png = render_image(pv, title)
-    summary = (f"{int(pv.loc['Grand Total', 'Grand Total'])} pending calls "
-               f"({age}) across {len(pv) - 1} executives.")
+    title = (f"Pending calls - {executive.title()} - {age}" if executive else f"Pending calls - {age}")
+    title += "" if standard_filters else " (no filters)"
+    png = render_image(pv, title, "Franchise" if executive else "Row Labels")
+    total = int(pv.loc["Grand Total", "Grand Total"])
+    if executive:
+        summary = f"{executive.title()}: {total} pending calls ({age}) across {len(pv) - 1} franchises."
+    else:
+        summary = f"{total} pending calls ({age}) across {len(pv) - 1} executives."
     return png, summary
 
 
