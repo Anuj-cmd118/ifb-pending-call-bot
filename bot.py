@@ -85,7 +85,7 @@ def ask_csat(to):
 def ask_age(to, action):
     body = {"chase": "Chase list: calls past SLA, ranked by priority. Which age counts as breached?",
             "exec": "Franchise-wise report for one executive. Show calls pending for:",
-            "ageing": "Ageing summary: show each day from 0 up to N, then one '>N days' column. Choose N:"
+            "ageing": "Ageing summary: each day from 0 up to N, then '>N-1 days' and '>N days' columns. Choose N:"
             }.get(action, "Show calls pending for:")
     if action == "ageing":
         btns = [("age_3", "Up to 3 days"), ("age_4", "Up to 4 days"), ("age_custom", "Other / custom")]

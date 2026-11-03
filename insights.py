@@ -244,25 +244,28 @@ def ageing_summary(source, upto=4, standard_filters=True):
     ct = ct.reindex(columns=range(upto + 2), fill_value=0)
     out = ct[list(range(upto + 1))].copy()
     out["Grand Total"] = ct.sum(axis=1)
+    out[f">{upto - 1} Days"] = ct[upto] + ct[upto + 1]      # N-1 column, placed beside N
     out[f">{upto} Days"] = ct[upto + 1]
     out = out.sort_values("Grand Total", ascending=False)
     body = out.copy()
     total = body.sum()
 
-    gt_col, old_col = upto + 2, upto + 3
-    headers = ["Row Labels"] + [str(i) for i in range(upto + 1)] + ["Grand Total", f">{upto} Days"]
-    name_w = max(3.6, 0.13 * max(len(n) for n in body.index) + 0.6)
-    widths = [name_w] + [0.6] * (upto + 1) + [1.3, 1.2]
-    rows = [[n] + ["" if v == 0 else int(v) for v in r.values[:upto + 1]] + [int(r.values[upto + 1]), int(r.values[upto + 2])]
-            for n, r in body.iterrows()]
-    rows.append(["Grand Total"] + [int(v) for v in total.values[:upto + 1]] + [int(total.values[upto + 1]), int(total.values[upto + 2])])
-    colours = {gt_col: eng._excel_3_colour_scale(body["Grand Total"].values),
-               old_col: eng._excel_3_colour_scale(body[f">{upto} Days"].values)}
-    title = "Pending calls by days old" + ("" if standard_filters else " (no filters)")
+    n = upto + 1                                  # number of day columns
+    headers = ["Row Labels"] + [str(i) for i in range(n)] + ["Grand Total", f">{upto - 1} Days", f">{upto} Days"]
+    name_w = max(3.6, 0.13 * max(len(x) for x in body.index) + 0.6)
+    widths = [name_w] + [0.6] * n + [1.3, 1.2, 1.2]
+    rows = [[name] + ["" if v == 0 else int(v) for v in r.values[:n]] + [int(v) for v in r.values[n:]]
+            for name, r in body.iterrows()]
+    rows.append(["Grand Total"] + [int(v) for v in total.values])
+    colours = {n + 1: eng._excel_3_colour_scale(body["Grand Total"].values),
+               n + 2: eng._excel_3_colour_scale(body[f">{upto - 1} Days"].values),
+               n + 3: eng._excel_3_colour_scale(body[f">{upto} Days"].values)}
+    title = "Pending calls by days old" + (" (standard filters applied)" if standard_filters else " (no filters)")
     png = _table_png(headers, rows, widths, title, colour_cols=colours, total_row=True)
     worst = body[f">{upto} Days"].idxmax()
-    summary = (f"{int(total['Grand Total'])} pending calls | {int(total[f'>{upto} Days'])} older than {upto} days "
-               f"| most overdue: {worst.title()} ({int(body.loc[worst, f'>{upto} Days'])})"
+    summary = (f"{int(total['Grand Total'])} pending calls | {int(total[f'>{upto - 1} Days'])} older than {upto - 1} days "
+               f"| {int(total[f'>{upto} Days'])} older than {upto} days "
+               f"| most overdue (>{upto}): {worst.title()} ({int(body.loc[worst, f'>{upto} Days'])})"
                + ("\n(standard filters applied)" if standard_filters else ""))
     return png, summary
 
@@ -274,6 +277,7 @@ def csat_by_executive(source):
     df = load_csat(source)
     col = "Branch Exe Name"
     df[col] = df[col].fillna("(no executive)").astype(str).str.strip()
+    df = eng.drop_excluded_executives(df, col)
     g = pd.crosstab(df[col], df["FeedBack"])
     for c in ("HAPPY", "NOT HAPPY", "OK"):
         if c not in g:
