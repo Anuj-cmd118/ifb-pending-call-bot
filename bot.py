@@ -11,6 +11,7 @@ Run:  python bot.py        (then expose port 5000 with ngrok / a server)
 """
 import os
 import threading
+import traceback
 import time
 
 import requests
@@ -150,7 +151,7 @@ def generate_ageing(to, s):
 def generate_csat_exec(to, s):
     send_text(to, "Building the executive-wise CSS report...")
     png, summary = ins.csat_by_executive(s["file"])
-    send_image(to, png, summary)
+    send_image(to, png, summary) if png else send_text(to, summary)
     finish(to)
 
 def finish(to):
@@ -251,6 +252,14 @@ def handle(msg):
 
 
 # --------------------------------------------------------------- webhook
+VERSION = "2026-11-03-exclusions-v3"
+
+@app.get("/version")
+def version():
+    """Open /version in a browser to see which code Render is really running."""
+    return {"version": VERSION,
+            "excluded_executives": getattr(eng, "EXCLUDE_EXECUTIVES", "MISSING - old report_engine.py on GitHub")}
+
 @app.get("/health")
 def health():
     return "ok", 200          # used by the uptime pinger to keep the free host awake
@@ -300,8 +309,10 @@ def _safe(msg):
     try:
         handle(msg)
     except Exception as e:
+        traceback.print_exc()                      # full detail goes to the Render logs
         print("handler error:", repr(e))
-        send_text(msg["from"], "Something went wrong. Please type *hi* and try again.")
+        send_text(msg["from"], f"Something went wrong ({type(e).__name__}: {str(e)[:120]}). "
+                               "Please type *hi* and try again.")
 
 if __name__ == "__main__":
     app.run(port=5000)

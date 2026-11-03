@@ -28,6 +28,35 @@ STD_EXCLUDE_TYPES = ["COURTESY VISIT", "DEALER DEFECTIVE REQUEST"]
 STD_EXCLUDE_REASONS = ["Request soft closure verification",
                        "Cancellation Request verification"]
 
+# Not branch executives: never shown in any executive-wise report.
+# Matching ignores case, spaces and punctuation, and also catches spelling variants:
+# an entry matches if it is contained in the executive's name (or the reverse) once
+# both are normalised, for entries of 6+ letters. Edit this list to change who is excluded.
+EXCLUDE_EXECUTIVES = ["Darma Raju E", "Dharmaraju", "Darmaraju",
+                      "Dantuluri Jayanth Varma", "Jayanth",
+                      "UNASSIGNED", "(no executive)"]
+
+
+def _norm(n) -> str:
+    return "".join(ch for ch in str(n).lower() if ch.isalnum())
+
+
+def is_excluded_executive(name) -> bool:
+    k = _norm(name)
+    for entry in EXCLUDE_EXECUTIVES:
+        b = _norm(entry)
+        if not b:
+            continue
+        if k == b or (len(b) >= 6 and b in k) or (len(k) >= 6 and k in b):
+            return True
+    return False
+
+
+def drop_excluded_executives(df, col=None):
+    col = col or "Service Executive Name"
+    return df[~df[col].map(is_excluded_executive)]
+
+
 HEADER_ROW = 2   # rows 0-1 are the title and date-range lines
 
 
@@ -50,11 +79,11 @@ def load_report(source) -> pd.DataFrame:
     df[COL_DAYS] = pd.to_numeric(df[COL_DAYS], errors="coerce")
     df = df.dropna(subset=[COL_DAYS])
     df[COL_DAYS] = df[COL_DAYS].astype(int)
-    df[COL_EXEC] = df[COL_EXEC].fillna("UNASSIGNED").astype(str).str.strip()
+    df[COL_EXEC] = df[COL_EXEC].fillna("UNASSIGNED").astype(str).str.strip().replace("", "UNASSIGNED")
     # The portal repeats a ticket once per spare-part line, so count each ticket once.
     if "Ticket No" in df.columns:
         df = df.drop_duplicates(subset="Ticket No", keep="first")
-    return df
+    return drop_excluded_executives(df, COL_EXEC)
 
 
 def date_range_text(source) -> str:

@@ -266,7 +266,8 @@ def ageing_summary(source, upto=4, standard_filters=True):
     summary = (f"{int(total['Grand Total'])} pending calls | {int(total[f'>{upto - 1} Days'])} older than {upto - 1} days "
                f"| {int(total[f'>{upto} Days'])} older than {upto} days "
                f"| most overdue (>{upto}): {worst.title()} ({int(body.loc[worst, f'>{upto} Days'])})"
-               + ("\n(standard filters applied)" if standard_filters else ""))
+               + ("\n(standard filters applied)" if standard_filters else "")
+               + "\nExcluded: Darma Raju E, Dantuluri Jayanth Varma, unassigned")
     return png, summary
 
 
@@ -275,9 +276,15 @@ def csat_by_executive(source):
     """Executive-wise CSAT. CSS = (HAPPY - NOT HAPPY) / Grand Total, where the total includes OK.
     Rows sorted worst CSS first. Returns (png, summary)."""
     df = load_csat(source)
-    col = "Branch Exe Name"
+    col = next((c for c in df.columns if c.strip().lower() == "branch exe name"),
+               next((c for c in df.columns if "exe" in c.lower() and "name" in c.lower()), None))
+    if col is None:
+        raise ValueError("no executive-name column in this CSAT file (columns: " + ", ".join(df.columns[:12]) + ")")
     df[col] = df[col].fillna("(no executive)").astype(str).str.strip()
     df = eng.drop_excluded_executives(df, col)
+    df["FeedBack"] = df["FeedBack"].replace({"NOTHAPPY": "NOT HAPPY", "NOT_HAPPY": "NOT HAPPY"})
+    if df.empty:
+        return None, "No CSAT responses left after removing the excluded executives."
     g = pd.crosstab(df[col], df["FeedBack"])
     for c in ("HAPPY", "NOT HAPPY", "OK"):
         if c not in g:
