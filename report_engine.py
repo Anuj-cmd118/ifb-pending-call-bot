@@ -110,9 +110,11 @@ def build_pivot(df, min_days=3, call_type_filter=None, status_filter=None,
 
 
 # --------------------------------------------------------------- rendering
-def _excel_3_colour_scale(values):
+def _excel_3_colour_scale(values, reverse=False):
     """Mimics Excel's default Green-Yellow-Red scale (min=green, 50th pct=yellow, max=red)."""
     green, yellow, red = (99, 190, 123), (255, 235, 132), (248, 105, 107)
+    if reverse:                      # low = red, high = green (e.g. satisfaction scores)
+        green, red = red, green
     lo, mid, hi = np.min(values), np.percentile(values, 50), np.max(values)
 
     def mix(a, b, t):

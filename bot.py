@@ -72,17 +72,26 @@ def download_media(media_id) -> bytes:
 
 # ------------------------------------------------------------ conversation
 def ask_action(to):
-    send_buttons(to, "Got the pending call file. What do you need?",
-                 [("act_pivot", "Executive pivot"), ("act_chase", "Chase list"),
-                  ("act_exec", "By executive")])
+    send_list(to, "Got the pending call file. What do you need?", "Choose report",
+              [("act_pivot", "Executive pivot", "Executive x days, filtered"),
+               ("act_ageing", "Ageing summary", "Days 0-N plus total and >N days"),
+               ("act_chase", "Chase list", "Top calls past SLA, ranked"),
+               ("act_exec", "By executive", "One executive, franchise-wise")])
+
+def ask_csat(to):
+    send_buttons(to, "Got the customer satisfaction file. What do you need?",
+                 [("csat_exec", "By executive (CSS)"), ("csat_fr", "Franchise scorecard")])
 
 def ask_age(to, action):
     body = {"chase": "Chase list: calls past SLA, ranked by priority. Which age counts as breached?",
-            "exec": "Franchise-wise report for one executive. Show calls pending for:"
+            "exec": "Franchise-wise report for one executive. Show calls pending for:",
+            "ageing": "Ageing summary: show each day from 0 up to N, then one '>N days' column. Choose N:"
             }.get(action, "Show calls pending for:")
-    send_buttons(to, body,
-                 [("age_2", "More than 2 days"), ("age_3", "More than 3 days"),
-                  ("age_custom", "Other / custom")])
+    if action == "ageing":
+        btns = [("age_3", "Up to 3 days"), ("age_4", "Up to 4 days"), ("age_custom", "Other / custom")]
+    else:
+        btns = [("age_2", "More than 2 days"), ("age_3", "More than 3 days"), ("age_custom", "Other / custom")]
+    send_buttons(to, body, btns)
 
 def ask_types(to, s):
     send_buttons(to, f"Calls older than {s['min_days']} days. Apply the standard filters?\n\n"
@@ -132,6 +141,18 @@ def generate_exec(to, s, name):
     send_image(to, png, summary + "\n(standard filters applied)") if png else send_text(to, summary)
     finish(to)
 
+def generate_ageing(to, s):
+    send_text(to, "Building the ageing summary...")
+    png, summary = ins.ageing_summary(s["file"], s["min_days"])
+    send_image(to, png, summary) if png else send_text(to, summary)
+    finish(to)
+
+def generate_csat_exec(to, s):
+    send_text(to, "Building the executive-wise CSS report...")
+    png, summary = ins.csat_by_executive(s["file"])
+    send_image(to, png, summary)
+    finish(to)
+
 def finish(to):
     send_text(to, "Send another Excel any time, or type *hi* to start over.")
     sessions.pop(to, None)
@@ -142,6 +163,8 @@ def after_age(to, s):
         generate_chase(to, s)
     elif s.get("action") == "exec":
         ask_executive(to, s)
+    elif s.get("action") == "ageing":
+        generate_ageing(to, s)
     else:
         ask_types(to, s)
 
@@ -173,7 +196,7 @@ def handle(msg):
         if rtype == "pending":
             s["stage"] = "action"; ask_action(to)
         elif rtype == "csat":
-            generate_csat(to, s)
+            s["stage"] = "csat"; ask_csat(to)
         elif rtype == "registered":
             send_text(to, "I recognise this as the *Calls Registered* report. I can't summarise it yet - "
                           "tell the developer what you want from it and it will be added next.")
@@ -195,11 +218,13 @@ def handle(msg):
         send_text(to, "Hi! Send me the *Pending call* or *Customer satisfaction score* Excel from the portal.")
         return
 
-    if s["stage"] == "action" and reply in ("act_pivot", "act_chase", "act_exec"):
-        s["action"] = {"act_pivot": "pivot", "act_chase": "chase", "act_exec": "exec"}[reply]
+    if s["stage"] == "csat" and reply in ("csat_exec", "csat_fr"):
+        generate_csat_exec(to, s) if reply == "csat_exec" else generate_csat(to, s)
+    elif s["stage"] == "action" and reply in ("act_pivot", "act_ageing", "act_chase", "act_exec"):
+        s["action"] = {"act_pivot": "pivot", "act_ageing": "ageing", "act_chase": "chase", "act_exec": "exec"}[reply]
         s["stage"] = "age"; ask_age(to, s["action"])
-    elif s["stage"] == "age" and reply in ("age_2", "age_3"):
-        s["min_days"] = int(reply[-1]); after_age(to, s)
+    elif s["stage"] == "age" and reply and reply.startswith("age_") and reply != "age_custom":
+        s["min_days"] = int(reply.split("_")[1]); after_age(to, s)
     elif s["stage"] == "age" and reply == "age_custom":
         s["stage"] = "age_number"
         send_text(to, "Type the number of days. e.g. *5* means calls pending more than 5 days.")

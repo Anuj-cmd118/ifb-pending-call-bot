@@ -122,7 +122,9 @@ def chase_summary(breach: pd.DataFrame, top_n, sla_days) -> str:
 
 
 # ------------------------------------------------------------- rendering
-def _table_png(headers, rows, widths, title="", colour_col=None, colours=None, left_cols=(2, 3)) -> bytes:
+def _table_png(headers, rows, widths, title="", colour_cols=None, left_cols=(), total_row=False) -> bytes:
+    """colour_cols = {column_index: [colour per body row]}; total_row styles the last row."""
+    colour_cols = colour_cols or {}
     n_rows, n_cols = len(rows) + 1, len(headers)
     total_w = sum(widths)
     fig_h = 0.42 * n_rows + (0.6 if title else 0.15)
@@ -145,9 +147,13 @@ def _table_png(headers, rows, widths, title="", colour_col=None, colours=None, l
     for c, h in enumerate(headers):
         cell(0, c, h, "#DCE6F1", True)
     for r, row in enumerate(rows, start=1):
+        is_total = total_row and r == len(rows)
         for c, v in enumerate(row):
-            bg = colours[r - 1] if (colour_col is not None and c == colour_col and colours) else "white"
-            cell(r, c, v, bg, ha="left" if c in left_cols else "center")
+            if is_total:
+                cell(r, c, v, "#DCE6F1", True)
+            else:
+                bg = colour_cols[c][r - 1] if c in colour_cols else "white"
+                cell(r, c, v, bg, ha="left" if c in left_cols else "center")
     ax.set_xlim(0, 1); ax.set_ylim(0, 1)
     buf = io.BytesIO()
     fig.savefig(buf, format="png", bbox_inches="tight", pad_inches=0.08, facecolor="white")
@@ -171,7 +177,7 @@ def render_chase_list(top: pd.DataFrame, sla_days, total_breach) -> bytes:
         d = r[eng.COL_DAYS]
         colours.append("#F8696B" if d >= 15 else "#FFC57A" if d >= 7 else "#FFEB84")
     title = f"Chase today - top {len(rows)} of {total_breach} calls past SLA (> {sla_days} days)"
-    return _table_png(headers, rows, widths, title, colour_col=4, colours=colours)
+    return _table_png(headers, rows, widths, title, colour_cols={4: colours}, left_cols=(2, 3))
 
 
 # ------------------------------------------------------------ CSAT scorecard
@@ -214,8 +220,86 @@ def csat_scorecard(source, top_n=10, min_n=MIN_RESPONSES):
     dates = re.findall(r"\d+/\d+/\d{4}", str(pd.read_excel(src, header=None, nrows=2).iloc[1, 0]))
     period = f" | {dates[0]} to {dates[-1]}" if dates else ""
     title = f"Franchise CSAT - lowest {len(rows)} by % not happy (min {min_n} responses){period}"
-    png = _table_png(headers, rows, widths, title, colour_col=3, colours=colours, left_cols=(1,))
+    png = _table_png(headers, rows, widths, title, colour_cols={3: colours}, left_cols=(1,))
     summary = (f"CSAT: {total} responses | Happy {100*happy/total:.1f}% | OK {100*ok/total:.1f}% | "
                f"Not happy {nh} ({100*nh/total:.1f}%).\n"
                f"{len(g)} franchises ranked (min {min_n} responses); showing the lowest {len(rows)}.")
+    return png, summary
+
+
+# ------------------------------------------------- ageing summary (0..N days + ">N")
+def ageing_summary(source, upto=4, standard_filters=True):
+    """Executive x days-old table: columns 0..upto, Grand Total (all calls) and '>upto Days'.
+    Returns (png, summary)."""
+    upto = max(1, min(int(upto), 15))
+    df = eng.load_report(source)
+    d = df
+    if standard_filters:
+        d = d[~d[eng.COL_TYPE].isin(eng.STD_EXCLUDE_TYPES)]
+        d = d[~d[eng.COL_REASON].astype(str).str.strip().str.lower()
+              .isin([r.lower() for r in eng.STD_EXCLUDE_REASONS])]
+    if d.empty:
+        return None, "No pending calls found with those filters."
+    ct = pd.crosstab(d[eng.COL_EXEC], d[eng.COL_DAYS].clip(upper=upto + 1))
+    ct = ct.reindex(columns=range(upto + 2), fill_value=0)
+    out = ct[list(range(upto + 1))].copy()
+    out["Grand Total"] = ct.sum(axis=1)
+    out[f">{upto} Days"] = ct[upto + 1]
+    out = out.sort_values("Grand Total", ascending=False)
+    body = out.copy()
+    total = body.sum()
+
+    gt_col, old_col = upto + 2, upto + 3
+    headers = ["Row Labels"] + [str(i) for i in range(upto + 1)] + ["Grand Total", f">{upto} Days"]
+    name_w = max(3.6, 0.13 * max(len(n) for n in body.index) + 0.6)
+    widths = [name_w] + [0.6] * (upto + 1) + [1.3, 1.2]
+    rows = [[n] + ["" if v == 0 else int(v) for v in r.values[:upto + 1]] + [int(r.values[upto + 1]), int(r.values[upto + 2])]
+            for n, r in body.iterrows()]
+    rows.append(["Grand Total"] + [int(v) for v in total.values[:upto + 1]] + [int(total.values[upto + 1]), int(total.values[upto + 2])])
+    colours = {gt_col: eng._excel_3_colour_scale(body["Grand Total"].values),
+               old_col: eng._excel_3_colour_scale(body[f">{upto} Days"].values)}
+    title = "Pending calls by days old" + ("" if standard_filters else " (no filters)")
+    png = _table_png(headers, rows, widths, title, colour_cols=colours, total_row=True)
+    worst = body[f">{upto} Days"].idxmax()
+    summary = (f"{int(total['Grand Total'])} pending calls | {int(total[f'>{upto} Days'])} older than {upto} days "
+               f"| most overdue: {worst.title()} ({int(body.loc[worst, f'>{upto} Days'])})"
+               + ("\n(standard filters applied)" if standard_filters else ""))
+    return png, summary
+
+
+# ----------------------------------------- CSAT by executive: CSS = (Happy - Not happy) / Total
+def csat_by_executive(source):
+    """Executive-wise CSAT. CSS = (HAPPY - NOT HAPPY) / Grand Total, where the total includes OK.
+    Rows sorted worst CSS first. Returns (png, summary)."""
+    df = load_csat(source)
+    col = "Branch Exe Name"
+    df[col] = df[col].fillna("(no executive)").astype(str).str.strip()
+    g = pd.crosstab(df[col], df["FeedBack"])
+    for c in ("HAPPY", "NOT HAPPY", "OK"):
+        if c not in g:
+            g[c] = 0
+    g["Total"] = g[["HAPPY", "NOT HAPPY", "OK"]].sum(axis=1)
+    g["CSS"] = (g["HAPPY"] - g["NOT HAPPY"]) / g["Total"]
+    g = g.sort_values(["CSS", "Total"], ascending=[True, False])
+    tot = g[["HAPPY", "NOT HAPPY", "OK", "Total"]].sum()
+    tot_css = (tot["HAPPY"] - tot["NOT HAPPY"]) / tot["Total"]
+
+    headers = ["Row Labels", "HAPPY", "NOT HAPPY", "OK", "Grand Total", "CSS"]
+    name_w = max(3.6, 0.13 * max(len(n) for n in g.index) + 0.6)
+    widths = [name_w, 1.0, 1.3, 0.7, 1.3, 0.9]
+    blank = lambda v: "" if v == 0 else int(v)
+    rows = [[n, blank(r["HAPPY"]), blank(r["NOT HAPPY"]), blank(r["OK"]), int(r["Total"]), f"{r['CSS']*100:.0f}%"]
+            for n, r in g.iterrows()]
+    rows.append(["Grand Total", int(tot["HAPPY"]), int(tot["NOT HAPPY"]), int(tot["OK"]), int(tot["Total"]), f"{tot_css*100:.0f}%"])
+    colours = {5: eng._excel_3_colour_scale(g["CSS"].values, reverse=True)}
+
+    import re
+    src = io.BytesIO(source) if isinstance(source, (bytes, bytearray)) else source
+    dates = re.findall(r"\d+/\d+/\d{4}", str(pd.read_excel(src, header=None, nrows=2).iloc[1, 0]))
+    period = f" | {dates[0]} to {dates[-1]}" if dates else ""
+    title = f"CSS = (Happy - Not happy) / Total incl. OK{period}"
+    png = _table_png(headers, rows, widths, title, colour_cols=colours, total_row=True)
+    low = g.index[0]
+    summary = (f"CSS overall {tot_css*100:.0f}% on {int(tot['Total'])} responses. "
+               f"Lowest: {low.title()} {g.loc[low, 'CSS']*100:.0f}%.\nCSS = (Happy - Not happy) / Total incl. OK")
     return png, summary
