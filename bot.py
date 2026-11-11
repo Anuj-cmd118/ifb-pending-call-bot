@@ -287,7 +287,7 @@ def handle(msg):
 
 
 # --------------------------------------------------------------- webhook
-VERSION = "2026-11-11-v5-franchise-css"
+VERSION = "2026-11-11-v6-need-zero-green"
 
 @app.get("/version")
 def version():
