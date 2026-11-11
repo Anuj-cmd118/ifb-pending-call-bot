@@ -398,12 +398,20 @@ def csat_franchise_css(source, executive=None, target_pct=CSS_TARGET_PCT):
     widths = [name_w, 1.0, 1.3, 0.7, 1.3, 0.9, 1.9]
     blank = lambda v: "" if v == 0 else int(v)
     rows = [[r["FR"], blank(r["HAPPY"]), blank(r["NOT HAPPY"]), blank(r["OK"]), int(r["Total"]),
-             fmt(r["CSS"]), int(r["Need"])] for _, r in g.iterrows()]
+             fmt(r["CSS"]), max(0, int(r["Need"]))] for _, r in g.iterrows()]
     rows.append(["Grand Total", int(tot["HAPPY"]), int(tot["NOT HAPPY"]), int(tot["OK"]), int(tot["Total"]),
-                 fmt(tot_css), int(tot_need)])
-    need_cols = eng._excel_3_colour_scale(list(g["Need"].values) + [tot_need])
-    colours = {5: [_css_colour(v, tgt) for v in g["CSS"].values], 6: need_cols[:-1]}
-    total_colours = {5: _css_colour(tot_css, tgt), 6: need_cols[-1]}
+                 fmt(tot_css), max(0, int(tot_need))])
+    shown = [max(0, int(v)) for v in g["Need"].values]
+    vmax = max(shown + [max(0, int(tot_need))])
+
+    def need_colour(v):                      # 0 = already at target -> green; more needed -> yellow to red
+        if v <= 0:
+            return (99 / 255, 190 / 255, 123 / 255)
+        t = min(1.0, v / vmax)
+        a, b = (255, 235, 132), (248, 105, 107)
+        return tuple((a[i] + (b[i] - a[i]) * t) / 255 for i in range(3))
+    colours = {5: [_css_colour(v, tgt) for v in g["CSS"].values], 6: [need_colour(v) for v in shown]}
+    total_colours = {5: _css_colour(tot_css, tgt), 6: need_colour(max(0, int(tot_need)))}
     png = _table_png(headers, rows, widths, "", colour_cols=colours, total_row=True, total_colours=total_colours)
 
     who = f"{executive.title()}: " if executive else ""
@@ -413,5 +421,5 @@ def csat_franchise_css(source, executive=None, target_pct=CSS_TARGET_PCT):
     summary = (f"{who}CSS {tot_css*100:.1f}% on {int(tot['Total'])} responses across {len(g)} franchises. "
                f"Below {target_pct}%: {below}. Overall: {ahead}.\n"
                f"CSS = (Happy - Not happy) / Total incl. OK. Yet to get {target_pct}% = extra HAPPY needed "
-               f"(negative = ahead).")
+               f"(0 = already at target).")
     return png, summary
