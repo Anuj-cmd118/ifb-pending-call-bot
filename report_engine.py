@@ -57,6 +57,9 @@ def drop_excluded_executives(df, col=None):
     return df[~df[col].map(is_excluded_executive)]
 
 
+# The WhatsApp caption already describes each report, so images carry no title strip.
+SHOW_IMAGE_TITLE = False
+
 HEADER_ROW = 2   # rows 0-1 are the title and date-range lines
 
 
@@ -162,6 +165,8 @@ def _excel_3_colour_scale(values, reverse=False):
 
 def render_image(pv: pd.DataFrame, title: str = "", row_label: str = "Row Labels") -> bytes:
     """Draws the pivot like the Excel screenshot and returns PNG bytes."""
+    if not SHOW_IMAGE_TITLE:
+        title = ""
     body = pv.iloc[:-1]
     cols = [row_label] + [str(c) for c in pv.columns[:-1]] + ["Grand Total"]
     n_rows, n_cols = len(pv) + 1, len(cols)
