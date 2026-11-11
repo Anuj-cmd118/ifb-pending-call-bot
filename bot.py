@@ -80,8 +80,27 @@ def ask_action(to):
                ("act_exec", "By executive", "One executive, franchise-wise")])
 
 def ask_csat(to):
-    send_buttons(to, "Got the customer satisfaction file. What do you need?",
-                 [("csat_exec", "By executive (CSS)"), ("csat_fr", "Franchise scorecard")])
+    send_list(to, "Got the customer satisfaction file. What do you need?", "Choose report",
+              [("csat_exec", "CSS by executive", "All executives, worst first"),
+               ("csat_exfr", "Executive's franchises", "Franchise-wise CSS, one executive"),
+               ("csat_fr", "Franchise scorecard", "10 lowest franchises by % not happy")])
+
+def ask_csat_executive(to, s):
+    ex = ins.csat_executives(s["file"])
+    if ex.empty:
+        send_text(to, "No CSAT responses found for any executive in this file.")
+        finish(to)
+        return
+    s["cexec_names"] = list(ex.index)[:10]
+    rows = [(f"cexec_{i}", n.title()[:24], f"{int(ex[n])} responses") for i, n in enumerate(s["cexec_names"])]
+    s["stage"] = "csat_pick"
+    send_list(to, "Which executive? Pick one, or type a name.", "Choose executive", rows)
+
+def generate_csat_exfr(to, s, name):
+    send_text(to, f"Building {name.title()}'s franchise-wise CSS report...")
+    png, summary = ins.csat_franchise_css(s["file"], name)
+    send_image(to, png, summary) if png else send_text(to, summary)
+    finish(to)
 
 def ask_age(to, action):
     body = {"chase": "Chase list: calls past SLA, ranked by priority. Which age counts as breached?",
@@ -121,7 +140,7 @@ def generate_chase(to, s):
 def generate_csat(to, s):
     send_text(to, "Building the franchise CSAT scorecard...")
     png, summary = ins.csat_scorecard(s["file"])
-    send_image(to, png, summary)
+    send_image(to, png, summary) if png else send_text(to, summary)
     finish(to)
 
 def ask_executive(to, s):
@@ -219,8 +238,24 @@ def handle(msg):
         send_text(to, "Hi! Send me the *Pending call* or *Customer satisfaction score* Excel from the portal.")
         return
 
-    if s["stage"] == "csat" and reply in ("csat_exec", "csat_fr"):
-        generate_csat_exec(to, s) if reply == "csat_exec" else generate_csat(to, s)
+    if s["stage"] == "csat" and reply in ("csat_exec", "csat_exfr", "csat_fr"):
+        if reply == "csat_exec":
+            generate_csat_exec(to, s)
+        elif reply == "csat_exfr":
+            ask_csat_executive(to, s)
+        else:
+            generate_csat(to, s)
+    elif s["stage"] == "csat_pick" and reply and reply.startswith("cexec_"):
+        generate_csat_exfr(to, s, s["cexec_names"][int(reply.split("_")[1])])
+    elif s["stage"] == "csat_pick" and text:
+        q = text.lower()
+        names = [n for n in ins.csat_executives(s["file"]).index if q in n.lower()]
+        if len(names) == 1:
+            generate_csat_exfr(to, s, names[0])
+        elif names:
+            send_text(to, "More than one match: " + ", ".join(n.title() for n in names) + ". Type a fuller name.")
+        else:
+            send_text(to, f"No executive matching '{text}' in this file. Try another name.")
     elif s["stage"] == "action" and reply in ("act_pivot", "act_ageing", "act_chase", "act_exec"):
         s["action"] = {"act_pivot": "pivot", "act_ageing": "ageing", "act_chase": "chase", "act_exec": "exec"}[reply]
         s["stage"] = "age"; ask_age(to, s["action"])
@@ -252,7 +287,7 @@ def handle(msg):
 
 
 # --------------------------------------------------------------- webhook
-VERSION = "2026-11-03-exclusions-v3"
+VERSION = "2026-11-11-v5-franchise-css"
 
 @app.get("/version")
 def version():
