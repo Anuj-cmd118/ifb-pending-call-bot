@@ -17,6 +17,7 @@ import report_engine as eng
 SLA_DAYS = 3                 # a call is an SLA breach when DAYS OLD > this
 CHASE_TOP_N = 10             # how many calls go on the "chase today" list
 MIN_RESPONSES = 20           # CSAT: franchises with fewer responses are not ranked
+CSS_TARGET_PCT = 95          # CSS target (whole percent) used by "Yet to get 95%"
 
 # priority points (higher = chase first)
 PTS_AGE_CAP = 30             # 1 point per day, capped
@@ -122,9 +123,12 @@ def chase_summary(breach: pd.DataFrame, top_n, sla_days) -> str:
 
 
 # ------------------------------------------------------------- rendering
-def _table_png(headers, rows, widths, title="", colour_cols=None, left_cols=(), total_row=False) -> bytes:
+def _table_png(headers, rows, widths, title="", colour_cols=None, left_cols=(), total_row=False,
+               total_colours=None) -> bytes:
     """colour_cols = {column_index: [colour per body row]}; total_row styles the last row."""
     colour_cols = colour_cols or {}
+    if not eng.SHOW_IMAGE_TITLE:
+        title = ""
     n_rows, n_cols = len(rows) + 1, len(headers)
     total_w = sum(widths)
     fig_h = 0.42 * n_rows + (0.6 if title else 0.15)
@@ -150,7 +154,7 @@ def _table_png(headers, rows, widths, title="", colour_cols=None, left_cols=(), 
         is_total = total_row and r == len(rows)
         for c, v in enumerate(row):
             if is_total:
-                cell(r, c, v, "#DCE6F1", True)
+                cell(r, c, v, (total_colours or {}).get(c, "#DCE6F1"), True)
             else:
                 bg = colour_cols[c][r - 1] if c in colour_cols else "white"
                 cell(r, c, v, bg, ha="left" if c in left_cols else "center")
@@ -204,7 +208,16 @@ def csat_scorecard(source, top_n=10, min_n=MIN_RESPONSES):
         if c not in g:
             g[c] = 0
     g["n"] = g[["HAPPY", "OK", "NOT HAPPY"]].sum(axis=1)
+    # Use the preferred minimum when enough franchises qualify; for small files lower it automatically.
+    chosen = 1
+    for m in sorted({min_n, 10, 5, 3, 2, 1}, reverse=True):
+        if m <= min_n and (g["n"] >= m).sum() >= top_n:
+            chosen = m
+            break
+    min_n = chosen
     g = g[g["n"] >= min_n].copy()
+    if g.empty:
+        return None, "No franchise has any CSAT responses in this file."
     g["happy_pct"] = 100 * g["HAPPY"] / g["n"]
     g["nh_pct"] = 100 * g["NOT HAPPY"] / g["n"]
     worst = g.sort_values(["nh_pct", "happy_pct"], ascending=[False, True]).head(top_n)
@@ -313,4 +326,92 @@ def csat_by_executive(source):
     low = g.index[0]
     summary = (f"CSS overall {tot_css*100:.0f}% on {int(tot['Total'])} responses. "
                f"Lowest: {low.title()} {g.loc[low, 'CSS']*100:.0f}%.\nCSS = (Happy - Not happy) / Total incl. OK")
+    return png, summary
+
+
+# ------------------------- franchise-wise CSS (one executive's franchises) + "Yet to get 95%"
+def _csat_with_exec(source):
+    """CSAT frame with a cleaned executive column; excluded executives removed."""
+    df = load_csat(source)
+    col = next((c for c in df.columns if c.strip().lower() == "branch exe name"),
+               next((c for c in df.columns if "exe" in c.lower() and "name" in c.lower()), None))
+    if col is None:
+        raise ValueError("no executive-name column in this CSAT file (columns: " + ", ".join(df.columns[:12]) + ")")
+    df[col] = df[col].fillna("(no executive)").astype(str).str.strip()
+    df = eng.drop_excluded_executives(df, col)
+    df["FeedBack"] = df["FeedBack"].replace({"NOTHAPPY": "NOT HAPPY", "NOT_HAPPY": "NOT HAPPY"})
+    return df, col
+
+
+def csat_executives(source):
+    """Executives in a CSAT file with their response counts (most first)."""
+    df, col = _csat_with_exec(source)
+    return df[col].value_counts()
+
+
+def _css_colour(css, target):
+    """Green (deeper the further above target) when CSS >= target, red below it."""
+    if css >= target:
+        t = 0.0 if target >= 1 else min(1.0, max(0.0, (css - target) / (1 - target)))
+        a, b = (169, 221, 142), (99, 190, 123)
+        return tuple((a[i] + (b[i] - a[i]) * t) / 255 for i in range(3))
+    return (248 / 255, 105 / 255, 107 / 255)
+
+
+def csat_franchise_css(source, executive=None, target_pct=CSS_TARGET_PCT):
+    """Franchise-wise CSS. executive=None -> every franchise; otherwise that executive's franchises.
+    CSS = (HAPPY - NOT HAPPY) / Total incl. OK.
+    'Yet to get 95%' = extra HAPPY responses still needed to reach the target (negative = ahead):
+        ceil((target*Total - 100*(HAPPY - NOT HAPPY)) / (100 - target)).
+    Rows sorted by CSS, best first. Returns (png, summary)."""
+    df, col = _csat_with_exec(source)
+    if executive:
+        df = df[df[col].str.lower() == executive.strip().lower()]
+    if df.empty:
+        return None, "No CSAT responses found for that selection."
+    df = df.assign(FR=df["FrName"].astype(str).str.strip())
+    g = pd.crosstab(df["FR"], df["FeedBack"])
+    for c in ("HAPPY", "NOT HAPPY", "OK"):
+        if c not in g:
+            g[c] = 0
+    g["Total"] = g[["HAPPY", "NOT HAPPY", "OK"]].sum(axis=1)
+    g["CSS"] = (g["HAPPY"] - g["NOT HAPPY"]) / g["Total"]
+
+    def need(h, nh, t):
+        num = target_pct * t - 100 * (h - nh)
+        return int(-((-num) // (100 - target_pct)))          # integer ceiling
+    g["Need"] = [need(r["HAPPY"], r["NOT HAPPY"], r["Total"]) for _, r in g.iterrows()]
+    g = g.reset_index()
+    g = g.sort_values(["CSS", "FR"], ascending=[False, True])
+
+    tot = g[["HAPPY", "NOT HAPPY", "OK", "Total"]].sum()
+    tot_css = (tot["HAPPY"] - tot["NOT HAPPY"]) / tot["Total"]
+    tot_need = need(tot["HAPPY"], tot["NOT HAPPY"], tot["Total"])
+
+    tgt = target_pct / 100
+
+    def fmt(v):                     # whole percent, but one decimal when rounding would cross the target line
+        p = v * 100
+        return f"{p:.1f}%" if (round(p) >= target_pct > p) else f"{p:.0f}%"
+    headers = ["FR Name", "HAPPY", "NOT HAPPY", "OK", "Grand Total", "CSS", f"Yet to get {target_pct}%"]
+    name_w = max(3.6, 0.13 * max(len(n) for n in g["FR"]) + 0.6)
+    widths = [name_w, 1.0, 1.3, 0.7, 1.3, 0.9, 1.9]
+    blank = lambda v: "" if v == 0 else int(v)
+    rows = [[r["FR"], blank(r["HAPPY"]), blank(r["NOT HAPPY"]), blank(r["OK"]), int(r["Total"]),
+             fmt(r["CSS"]), int(r["Need"])] for _, r in g.iterrows()]
+    rows.append(["Grand Total", int(tot["HAPPY"]), int(tot["NOT HAPPY"]), int(tot["OK"]), int(tot["Total"]),
+                 fmt(tot_css), int(tot_need)])
+    need_cols = eng._excel_3_colour_scale(list(g["Need"].values) + [tot_need])
+    colours = {5: [_css_colour(v, tgt) for v in g["CSS"].values], 6: need_cols[:-1]}
+    total_colours = {5: _css_colour(tot_css, tgt), 6: need_cols[-1]}
+    png = _table_png(headers, rows, widths, "", colour_cols=colours, total_row=True, total_colours=total_colours)
+
+    who = f"{executive.title()}: " if executive else ""
+    below = int((g["CSS"] * 100 < target_pct).sum())
+    ahead = (f"{-tot_need} responses ahead of {target_pct}%" if tot_need < 0
+             else f"{tot_need} more HAPPY needed to reach {target_pct}%")
+    summary = (f"{who}CSS {tot_css*100:.1f}% on {int(tot['Total'])} responses across {len(g)} franchises. "
+               f"Below {target_pct}%: {below}. Overall: {ahead}.\n"
+               f"CSS = (Happy - Not happy) / Total incl. OK. Yet to get {target_pct}% = extra HAPPY needed "
+               f"(negative = ahead).")
     return png, summary
