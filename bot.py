@@ -300,6 +300,27 @@ def generate_tech(to, s, name):
     send_image(to, png, summary + "\n(standard filters applied, mandatory calls excluded)") if png else send_text(to, summary)
     finish(to)
 
+MPAGE = 8   # 8 executives + "More" + "Done" = 10 rows (WhatsApp list limit)
+
+def ask_mand_exec(to, s, page=0):
+    names = s["mnames"]
+    chunk = names[page * MPAGE:(page + 1) * MPAGE]
+    cnt = ins.mandatory_executives(s["df"])
+    rows = [(f"mex_{page * MPAGE + i}", n.title()[:24], f"{int(cnt[n])} mandatory calls") for i, n in enumerate(chunk)]
+    left = len(names) - (page + 1) * MPAGE
+    if left > 0:
+        rows.append((f"mexpage_{page + 1}", "More executives >", f"{left} more"))
+    rows.append(("mex_done", "Done", "Finish"))
+    s["stage"], s["mpage"] = "mand", page
+    send_list(to, "Pick an executive for his franchise-wise mandatory data (or type part of the name).",
+              "Choose executive", rows)
+
+def generate_mand_exec(to, s, name):
+    send_text(to, f"Building {name.title()}'s franchise-wise mandatory report...")
+    png, summary = ins.mandatory_franchises(s["df"], name)
+    send_image(to, png, summary) if png else send_text(to, summary)
+    ask_mand_exec(to, s, s.get("mpage", 0))       # back to the picker; session stays open
+
 def finish(to):
     send_text(to, "Send another Excel any time, or type *hi* to start over.")
     sessions.pop(to, None)
@@ -342,12 +363,12 @@ def handle(msg):
             elif rtype == "softclosure":
                 ins.load_soft_closure(data)
             elif rtype == "mandatory":
-                ins.load_mandatory(data)
+                df = ins.load_mandatory(data)             # parsed once, cached for the executive picks
         except Exception as e:
             send_text(to, f"I couldn't read that file: {e}")
             sessions.pop(to, None)
             return
-        s.clear(); s.update({"file": None if rtype == "pending" else data, "df": df, "rtype": rtype})
+        s.clear(); s.update({"file": None if rtype in ("pending", "mandatory") else data, "df": df, "rtype": rtype})
         _touch(s)
         if rtype == "pending":
             s["stage"] = "action"; ask_action(to)
@@ -357,9 +378,13 @@ def handle(msg):
             s["stage"] = "soft"; ask_soft(to)
         elif rtype == "mandatory":
             send_text(to, "Building the Mandatory appointments report...")
-            png, summary = ins.mandatory_appointments(data)
+            png, summary = ins.mandatory_appointments(df)
             send_image(to, png, summary) if png else send_text(to, summary)
-            finish(to)
+            if png:
+                s["mnames"] = list(ins.mandatory_executives(df).index)
+                ask_mand_exec(to, s, 0)
+            else:
+                finish(to)
         elif rtype == "registered":
             send_text(to, "I recognise this as the *Calls Registered* report. I can't summarise it yet - "
                           "tell the developer what you want from it and it will be added next.")
@@ -428,6 +453,21 @@ def handle(msg):
             send_text(to, f"{len(names)} franchises match. Type more of the name.")
         else:
             send_text(to, f"No franchise matching '{text}' has {age_phrase(s['min_days'])}. Try another name.")
+    elif s["stage"] == "mand" and reply == "mex_done":
+        finish(to)
+    elif s["stage"] == "mand" and reply and reply.startswith("mexpage_"):
+        ask_mand_exec(to, s, int(reply.split("_")[1]))
+    elif s["stage"] == "mand" and reply and reply.startswith("mex_"):
+        generate_mand_exec(to, s, s["mnames"][int(reply.split("_")[1])])
+    elif s["stage"] == "mand" and text:
+        q = text.lower()
+        names = [n for n in s["mnames"] if q in n.lower()]
+        if len(names) == 1:
+            generate_mand_exec(to, s, names[0])
+        elif names:
+            send_text(to, "More than one match: " + ", ".join(n.title() for n in names[:6]) + ". Type a fuller name.")
+        else:
+            send_text(to, f"No executive matching '{text}'. Try another name, or type *hi* to start over.")
     elif s["stage"] == "lists_fran" and reply == "lfr_done":
         finish(to)
     elif s["stage"] == "lists_fran" and reply and reply.startswith("lfrpage_"):
@@ -493,7 +533,7 @@ def handle(msg):
 
 
 # --------------------------------------------------------------- webhook
-VERSION = "2026-11-19-v13-mandatory-css96"
+VERSION = "2026-11-19-v14-mandatory-franchises"
 
 @app.get("/version")
 def version():
@@ -557,3 +597,4 @@ def _safe(msg):
 
 if __name__ == "__main__":
     app.run(port=5000)
+
