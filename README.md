@@ -9,9 +9,10 @@ Send an Excel file exported from the portal; the bot detects which report it is.
 
 | File sent | Bot offers |
 |---|---|
-| **Pending call** | **Executive pivot** - executive x days-pending table, colour-coded<br>**Ageing summary** - executive x days 0..N, Grand Total and a ">N Days" column, both colour-scaled<br>**Chase list** - top 10 calls past SLA, ranked by priority<br>**By executive** - one executive's calls broken down franchise-wise<br>**Franchise technicians** - one franchise's calls broken down technician-wise<br>**Franchise call lists** - pick an executive; one call-list image per franchise (all pending calls) |
-| **Customer satisfaction score** | **CSS by executive** - HAPPY / NOT HAPPY / OK / Grand Total / CSS, worst first<br>**Executive's franchises** - pick an executive; franchise-wise CSS with a "Yet to get 95%" column<br>**Franchise scorecard** - the 10 lowest by % not happy |
+| **Pending call** | **Executive pivot** - executive x days-pending table, colour-coded<br>**Ageing summary** - executive x days 0..N, Grand Total and a ">N Days" column, both colour-scaled<br>**Chase list** - top 10 calls past SLA, ranked by priority<br>**By executive** - one executive's calls broken down franchise-wise<br>**Franchise technicians** - one franchise's calls broken down technician-wise<br>**Franchise call lists** - pick an executive, then a franchise; one call-list image at a time (all pending calls) |
+| **Customer satisfaction score** | **CSS by executive** - HAPPY / NOT HAPPY / OK / Grand Total / CSS, worst first<br>**Executive's franchises** - pick an executive; franchise-wise CSS with "Yet to get 95%" and "Yet to get 96%" columns<br>**Franchise scorecard** - the 10 lowest by % not happy |
 | **Soft Closure (All Status)** | **Closed: by executive** - calls soft closed on the report day, executive x days taken, Grand Total row = all executives combined<br>**All executives combined** - same, split by call type<br>**Executive's franchises** - pick an executive; franchise x days taken (A to Z) |
+| **Mandatory Appointment** | Sends the **ASM x visit status** table at once (Future / Missed / Today / Cancelled / Visit Done / Grand Total / MC %), then a picker: choose an executive to get his **franchise-wise** mandatory data; pick another or tap Done |
 | **Calls Registered** | Recognised; no output yet |
 
 Type `hi` at any time to start over.
@@ -28,13 +29,14 @@ counting and executive exclusions as the other pending reports, and it also leav
 pending call (pivot, by executive and franchise technicians).
 
 ### Franchise call lists
-Pick an executive (or type a name) and the bot sends one image per franchise, A to Z, in the layout the executive
-makes by hand: Franchise Name, Ticket No, Customer Name, Pincode, Call Type, Product, Machine Status (blank = NA),
-Call Book Date (mm/dd/yyyy), DAYS OLD. Rows are sorted by DAYS OLD high to low, newest booking first within a day.
-Calls 2+ days old are solid red rows; 0 and 1 day are red text on white (`CALL_LIST_RED_FROM` in `insights.py`).
-All pending calls are included (no age limit) with the same standard filters and ticket counting as the other
-pending reports. A franchise with more than 40 calls is split into pages (`CALL_LIST_PAGE_ROWS`).
-The images are sent one after another, so a long list takes a little while on the free Render plan.
+Pick an executive (or type a name), then pick a franchise from the list (8 per page, "More franchises >", "Done"; typing
+part of a name also works). The bot sends that franchise's call list only, then shows the franchise picker again, so
+the load stays small on the free Render plan. Layout is the one the executive makes by hand: Franchise Name, Ticket No,
+Customer Name, Pincode, Call Type, Product, Machine Status (blank = NA), Call Book Date (mm/dd/yyyy), DAYS OLD. Rows are
+sorted by DAYS OLD high to low, newest booking first within a day. Calls 2+ days old are solid red rows; 0 and 1 day are
+red text on white (`CALL_LIST_RED_FROM` in `insights.py`). All pending calls are included (no age limit) with the same
+standard filters and ticket counting as the other pending reports. A franchise with more than 40 calls is split into
+pages (`CALL_LIST_PAGE_ROWS`). Image sharpness is `CALL_LIST_DPI` (130).
 
 ### Chase list
 Asks which age counts as an SLA breach, then ranks calls by priority and shows:
@@ -43,8 +45,9 @@ Reason tags: Part pending, Technician action, Revisit / rework, Customer unavail
 Other, No reason given. Customer names are deliberately not shown.
 
 ### By executive
-Asks the age, lists the executives who have calls past that age (tap one, or type part
-of a name), and returns that executive's pending calls franchise-wise.
+Asks the age (**All incl. 0 days**, more than 3 days, or custom), lists the executives who have calls past that age
+(tap one, or type part of a name), and returns that executive's pending calls franchise-wise. "All incl. 0 days" adds a
+0-day column (calls booked today); at the custom prompt, a number means "more than N days" and *all* means every pending call.
 
 ### Ageing summary
 Asks "up to 3 / up to 4 days / custom" (N), then shows one column per day from 0 to N, a
@@ -54,13 +57,23 @@ Grand Total of all calls, then ">N-1 Days" and ">N Days" columns side by side (e
 ### CSS by executive
 CSS = (HAPPY - NOT HAPPY) / Grand Total, where Grand Total includes OK. Executives are sorted
 worst CSS first, with a red (low) to green (high) colour scale. The period is whatever
-date range the exported file covers.
+date range the exported file covers. Two extra columns, **Yet to get 95%** and **Yet to get 96%**, show how many more
+HAPPY responses each executive needs (0 = already at target); the Grand Total of each is the **sum of the executives
+above it**, not recomputed from the totals, so it is not 0 while anyone still needs responses.
 
 ### Executive's franchises (franchise-wise CSS)
 Pick an executive (or type a name); the report lists that executive's franchises with HAPPY, NOT HAPPY,
-OK, Grand Total and CSS, best first (ties alphabetical). **Yet to get 95%** = extra HAPPY responses still
-needed to reach 95% = 19 x Total - 20 x (HAPPY - NOT HAPPY); a franchise already at the target shows 0 (green) instead of a negative number.
-CSS cells are green at or above the target and red below it. The target is `CSS_TARGET_PCT` in `insights.py`.
+OK, Grand Total and CSS, best first (ties alphabetical). **Yet to get 95%** and **Yet to get 96%** = extra HAPPY
+responses still needed to reach the target = ceil((X x Total - 100 x (HAPPY - NOT HAPPY)) / (100 - X)); a franchise
+already at the target shows 0 (green) instead of a negative number. The Grand Total row of each column is the sum of the
+franchise rows. CSS cells are green at or above the first target and red below it. Targets are `CSS_TARGETS = (95, 96)` in `insights.py`.
+
+### Mandatory appointments
+Upload the *Report for Mandatory Appointment* Excel. Rows are counted per ASM (BSE Name) by Visit Status: Future Appt,
+Missed Appt, Today Appt, Visit cancelled, Visit Done. **MC %** = Visit Done / Grand Total, best first, colour-scaled
+(high = green); the Grand Total row is all ASMs combined. The bot then offers the ASM list (8 per page, "More executives >",
+"Done", or type part of a name); picking one returns that executive's franchises with the same columns. Excluded
+executives are left out. The parsed file is cached for the session.
 
 ### Soft closure reports
 Days taken = soft closure date - call book date (both read as mm/dd/yyyy). Only calls soft closed on the
@@ -86,11 +99,19 @@ Per franchise: responses, happy %, OK and not-happy counts. Franchises with fewe
   escalation, +8 repeat call, +5 no reason given
 
 **Excluded executives** (`EXCLUDE_EXECUTIVES` at the top of `report_engine.py`): Darma Raju E,
-Dantuluri Jayanth Varma and calls with no executive are left out of every executive-wise
-report (pivot, ageing, chase list, by executive, CSS). Matching ignores case and spaces.
+Dantuluri Jayanth Varma, Thathastu, Kaveri and calls with no executive are left out of every executive-wise
+report (pivot, ageing, chase list, by executive, CSS, soft closure, mandatory). Matching ignores case, spaces and punctuation.
 
 **Counting:** the portal repeats a ticket once per spare-part line, so each ticket is
 counted once. A call is a unique Ticket No.
+
+## Speed and memory (free Render plan)
+
+- The Excel is parsed **once** on upload and the parsed table is kept in the session; every later pick (executive,
+  franchise, age) reuses it instead of re-reading the file.
+- Reports that list many franchises are sent **one pick at a time** rather than all at once.
+- A background thread deletes a session, and the Excel with it, after **30 minutes idle** (`SESSION_TTL` at the top of
+  `bot.py`). After that the bot asks for the file again. Restarts also clear sessions.
 
 ## Files
 
@@ -98,14 +119,14 @@ counted once. A call is a unique Ticket No.
 |---|---|
 | `bot.py` | WhatsApp webhook and the conversation flow |
 | `report_engine.py` | Reads the pending call Excel; builds the pivot images (executive-wise and franchise-wise) |
-| `insights.py` | File-type detection, chase list, CSAT scorecard |
+| `insights.py` | File-type detection, chase list, CSAT / CSS, soft closure, call lists, mandatory appointments |
 | `requirements.txt` | Python packages |
 | `render.yaml` | Render service definition (optional; the start command below is what matters) |
 | `.env.example` | Names of the environment variables |
 | `.gitignore` | Keeps `.env` and Excel files out of GitHub |
 | `*_sample.png` | Example outputs |
 
-All three `.py` files must be on GitHub together. `bot.py` imports the other two.
+All three `.py` files must be on GitHub together. `bot.py` imports the other two. After a deploy, open `/version` to confirm which build is live.
 
 ## Test the report engine alone (no WhatsApp)
 
