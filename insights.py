@@ -249,7 +249,7 @@ def ageing_summary(source, upto=4, standard_filters=True):
     """Executive x days-old table: columns 0..upto, Grand Total (all calls) and '>upto Days'.
     Returns (png, summary)."""
     upto = max(1, min(int(upto), 15))
-    df = eng.load_report(source)
+    df = source if isinstance(source, pd.DataFrame) else eng.load_report(source)
     d = df
     if standard_filters:
         d = d[~d[eng.COL_TYPE].isin(eng.STD_EXCLUDE_TYPES)]
@@ -588,6 +588,7 @@ def soft_closure_franchises(source, executive):
 CALL_LIST_COLUMNS = ["Franchise Name", "Ticket No", "Customer Name", "Pincode", "Call Type",
                      "Product", "Machine Status", "Call Book Date", "DAYS OLD"]
 CALL_LIST_RED_FROM = 2          # DAYS OLD >= this -> whole row red
+CALL_LIST_DPI = 130             # image sharpness; 200 was slower and heavier on the free tier
 CALL_LIST_PAGE_ROWS = 40        # longer franchises are split into pages of this many rows
 
 
@@ -633,7 +634,7 @@ def render_call_list(rows: pd.DataFrame) -> bytes:
 
     row_h = 0.34
     total_w, n_rows = sum(widths), len(body) + 1
-    fig = plt.figure(figsize=(total_w, row_h * n_rows), dpi=200)
+    fig = plt.figure(figsize=(total_w, row_h * n_rows), dpi=CALL_LIST_DPI)
     ax = fig.add_axes([0, 0, 1, 1])
     ax.set_xlim(0, total_w); ax.set_ylim(0, row_h * n_rows); ax.axis("off")
     xs = np.concatenate([[0], np.cumsum(widths)])
@@ -660,32 +661,56 @@ def render_call_list(rows: pd.DataFrame) -> bytes:
             ax.text(x + w / 2, y + row_h / 2, val, ha="center", va="center", fontsize=10,
                     fontweight="bold", color="black" if red else "#FF0000")
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=200, facecolor="white", bbox_inches="tight", pad_inches=0.02)
+    fig.savefig(buf, format="png", dpi=CALL_LIST_DPI, facecolor="white", bbox_inches="tight", pad_inches=0.02)
     plt.close(fig)
     return buf.getvalue()
 
 
-def franchise_call_lists(source, executive):
-    """All pending calls of one executive, one image (or several pages) per franchise, franchises A to Z.
-    Same standard filters as the other pending reports. Returns ([(png, caption), ...], franchise_count)."""
-    df = eng.load_report(source)
+def _call_list_scope(source, executive):
+    """One executive's pending calls after the standard filters, with parsed date + franchise columns."""
+    df = source.copy() if isinstance(source, pd.DataFrame) else eng.load_report(source)
     d = df[df[eng.COL_EXEC].str.strip().str.lower() == executive.strip().lower()]
     d = d[~d[eng.COL_TYPE].isin(eng.STD_EXCLUDE_TYPES)]
     d = d[~d[eng.COL_REASON].astype(str).str.strip().str.lower().isin([r.lower() for r in eng.STD_EXCLUDE_REASONS])]
     if d.empty:
-        return [], 0
-    d = d.assign(_cb=_parse_us_dates(d["Call Book Date"]),
-                 _fr=d["Franchise Name"].fillna("(no franchise)").astype(str).str.strip())
+        return d
+    return d.assign(_cb=_parse_us_dates(d["Call Book Date"]),
+                    _fr=d["Franchise Name"].fillna("(no franchise)").astype(str).str.strip())
+
+
+def call_list_franchises(source, executive):
+    """Franchises of one executive with pending calls, A to Z -> pandas Series {name: call count}."""
+    d = _call_list_scope(source, executive)
+    if d.empty:
+        return pd.Series(dtype=int)
+    c = d["_fr"].value_counts()
+    return c.reindex(sorted(c.index, key=str.lower))
+
+
+def franchise_call_list(source, executive, franchise):
+    """Call list image(s) for ONE franchise of an executive. Returns [(png, caption), ...]."""
+    d = _call_list_scope(source, executive)
+    g = d[d["_fr"].str.lower() == franchise.strip().lower()] if not d.empty else d
+    if g.empty:
+        return []
+    name = g["_fr"].iloc[0]
+    g = g.sort_values(["DAYS OLD", "_cb"], ascending=[False, False])
+    red = int((g["DAYS OLD"] >= CALL_LIST_RED_FROM).sum())
+    chunks = [g.iloc[i:i + CALL_LIST_PAGE_ROWS] for i in range(0, len(g), CALL_LIST_PAGE_ROWS)]
     pages = []
-    names = sorted(d["_fr"].unique(), key=str.lower)
-    for name in names:
-        g = d[d["_fr"] == name].sort_values(["DAYS OLD", "_cb"], ascending=[False, False])
-        red = int((g["DAYS OLD"] >= CALL_LIST_RED_FROM).sum())
-        chunks = [g.iloc[i:i + CALL_LIST_PAGE_ROWS] for i in range(0, len(g), CALL_LIST_PAGE_ROWS)]
-        for i, ch in enumerate(chunks, start=1):
-            cap = (f"{name}: {len(g)} pending call{'s' if len(g) != 1 else ''} | "
-                   f"{red} at {CALL_LIST_RED_FROM}+ days (red)")
-            if len(chunks) > 1:
-                cap += f" | part {i} of {len(chunks)}"
-            pages.append((render_call_list(ch), cap))
+    for i, ch in enumerate(chunks, start=1):
+        cap = (f"{name}: {len(g)} pending call{'s' if len(g) != 1 else ''} | "
+               f"{red} at {CALL_LIST_RED_FROM}+ days (red)")
+        if len(chunks) > 1:
+            cap += f" | part {i} of {len(chunks)}"
+        pages.append((render_call_list(ch), cap))
+    return pages
+
+
+def franchise_call_lists(source, executive):
+    """Kept for compatibility: ALL franchises at once (slow). Prefer call_list_franchises + franchise_call_list."""
+    pages = []
+    names = list(call_list_franchises(source, executive).index)
+    for n in names:
+        pages += franchise_call_list(source, executive, n)
     return pages, len(names)
