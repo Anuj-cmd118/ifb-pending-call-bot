@@ -180,7 +180,7 @@ def render_image(pv: pd.DataFrame, title: str = "", row_label: str = "Row Labels
     name_w = max(3.6, 0.13 * max(len(s) for s in pv.index) + 0.6)
     fig_w = name_w + 0.55 * (n_cols - 2) + 1.3
     fig_h = 0.42 * n_rows + (0.55 if title else 0.15)
-    fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=200)
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=120)
     ax.axis("off")
 
     widths = [name_w] + [0.55] * (n_cols - 2) + [1.3]
@@ -248,6 +248,11 @@ def list_franchises(source, min_days=3, standard_filters=True):
     return pv["Grand Total"].drop("Grand Total")
 
 
+def list_exec_franchises(df, executive, min_days=3):
+    d = df[df[COL_EXEC].str.lower() == executive.strip().lower()]
+    return list_franchises(d, min_days)
+
+
 def make_report(source, min_days=3, standard_filters=True, call_type_filter=None,
                 status_filter=None, max_days=None, executive=None, franchise=None):
     """One-call helper used by the bot. Returns (png_bytes | None, summary_text).
@@ -256,7 +261,7 @@ def make_report(source, min_days=3, standard_filters=True, call_type_filter=None
     executive="CHENDRA C" -> that executive's calls, broken down FRANCHISE-wise.
     franchise="AYAAN ASSOCIATES" -> that franchise's calls, broken down TECHNICIAN-wise.
     min_days < 0 means all pending calls (no age limit)."""
-    df = load_report(source)
+    df = source.copy() if isinstance(source, pd.DataFrame) else load_report(source)
     index_col, row_label = COL_EXEC, "Row Labels"
     if franchise:
         df = df[df[COL_FRANCHISE].astype(str).str.strip().str.lower() == franchise.strip().lower()].copy()
