@@ -34,6 +34,7 @@ app = Flask(__name__)
 sessions = {}          # {phone: {"stage":..., "file": bytes, "min_days": int, ...}}
 seen_ids = set()       # WhatsApp can deliver the same message twice
 SESSION_TTL = 30 * 60  # seconds idle before the uploaded Excel is dropped from memory
+PENDING_TTL = 10 * 60  # after a pending-call report: the parsed file is kept this long for more reports
 
 
 def _touch(s):
@@ -44,7 +45,7 @@ def _reaper():
     while True:
         time.sleep(60)
         now = time.time()
-        for k in [k for k, v in list(sessions.items()) if now - v.get("ts", now) > SESSION_TTL]:
+        for k in [k for k, v in list(sessions.items()) if now - v.get("ts", now) > v.get("ttl", SESSION_TTL)]:
             sessions.pop(k, None)
         if len(seen_ids) > 5000:
             seen_ids.clear()
@@ -91,8 +92,8 @@ def download_media(media_id) -> bytes:
 
 
 # ------------------------------------------------------------ conversation
-def ask_action(to):
-    send_list(to, "Got the pending call file. What do you need?", "Choose report",
+def ask_action(to, body="Got the pending call file. What do you need?"):
+    send_list(to, body, "Choose report",
               [("act_pivot", "Executive pivot", "Executive x days, filtered"),
                ("act_ageing", "Ageing summary", "Days 0-N plus total and >N days"),
                ("act_chase", "Chase list", "Top calls past SLA, ranked"),
@@ -338,6 +339,16 @@ def generate_mand_exec(to, s, name):
     ask_mand_exec(to, s, s.get("mpage", 0))       # back to the picker; session stays open
 
 def finish(to):
+    s = sessions.get(to)
+    if s and s.get("rtype") == "pending" and s.get("df") is not None:
+        # keep the parsed pending file for PENDING_TTL so another report needs no re-upload
+        keep = {"rtype": "pending", "df": s["df"], "file": None}
+        s.clear()
+        s.update(keep, stage="action", ttl=PENDING_TTL)
+        _touch(s)
+        ask_action(to, "Same pending file is kept for 10 minutes. Pick another report, "
+                       "or send a new Excel / type *hi* to start over.")
+        return
     send_text(to, "Send another Excel any time, or type *hi* to start over.")
     sessions.pop(to, None)
 
@@ -563,7 +574,7 @@ def handle(msg):
 
 
 # --------------------------------------------------------------- webhook
-VERSION = "2026-11-19-v16-multi-select-separate"
+VERSION = "2026-11-19-v17-pending-keep-10min"
 
 @app.get("/version")
 def version():
@@ -589,7 +600,8 @@ over WhatsApp into a summary image.</p>
 <p>Your WhatsApp number, the messages you send to the bot, and the Excel file you upload.</p>
 <h2>How it is used</h2>
 <p>The file is processed in memory only to create the report image and is not saved to disk
-or shared with anyone. Session data is deleted after the report is sent or when the service restarts.</p>
+or shared with anyone. Session data is deleted after the report is sent (a pending call file is kept for up to 10 minutes
+so you can run more reports on it), after 30 minutes idle, or when the service restarts.</p>
 <h2>Sharing</h2>
 <p>We do not sell or share your data. Messages pass through Meta's WhatsApp Business Platform,
 which has its own privacy policy.</p>
