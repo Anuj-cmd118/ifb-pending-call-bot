@@ -77,7 +77,9 @@ def ask_action(to):
               [("act_pivot", "Executive pivot", "Executive x days, filtered"),
                ("act_ageing", "Ageing summary", "Days 0-N plus total and >N days"),
                ("act_chase", "Chase list", "Top calls past SLA, ranked"),
-               ("act_exec", "By executive", "One executive, franchise-wise")])
+               ("act_exec", "By executive", "One executive, franchise-wise"),
+               ("act_tech", "Franchise technicians", "One franchise, technician-wise"),
+               ("act_lists", "Franchise call lists", "Call list image per franchise")])
 
 def ask_csat(to):
     send_list(to, "Got the customer satisfaction file. What do you need?", "Choose report",
@@ -96,6 +98,34 @@ def ask_csat_executive(to, s):
     s["stage"] = "csat_pick"
     send_list(to, "Which executive? Pick one, or type a name.", "Choose executive", rows)
 
+def ask_soft(to):
+    send_list(to, "Got the soft closure file. What do you need?", "Choose report",
+              [("soft_exec", "Closed: by executive", "Executives x days taken, with total"),
+               ("soft_all", "All executives combined", "Closed calls by call type"),
+               ("soft_exfr", "Executive's franchises", "Franchise x days, one executive")])
+
+def ask_soft_executive(to, s):
+    ex = ins.soft_closure_executives(s["file"])
+    if ex.empty:
+        send_text(to, "No soft closed calls found for any executive in this file.")
+        finish(to)
+        return
+    s["sexec_names"] = list(ex.index)[:10]
+    rows = [(f"sexec_{i}", n.title()[:24], f"{int(ex[n])} calls closed") for i, n in enumerate(s["sexec_names"])]
+    s["stage"] = "soft_pick"
+    send_list(to, "Which executive? Pick one, or type a name.", "Choose executive", rows)
+
+def generate_soft(to, s, kind, name=None):
+    send_text(to, "Building the soft closure report...")
+    if kind == "soft_exec":
+        png, summary = ins.soft_closure_by_executive(s["file"])
+    elif kind == "soft_all":
+        png, summary = ins.soft_closure_combined(s["file"])
+    else:
+        png, summary = ins.soft_closure_franchises(s["file"], name)
+    send_image(to, png, summary) if png else send_text(to, summary)
+    finish(to)
+
 def generate_csat_exfr(to, s, name):
     send_text(to, f"Building {name.title()}'s franchise-wise CSS report...")
     png, summary = ins.csat_franchise_css(s["file"], name)
@@ -105,6 +135,7 @@ def generate_csat_exfr(to, s, name):
 def ask_age(to, action):
     body = {"chase": "Chase list: calls past SLA, ranked by priority. Which age counts as breached?",
             "exec": "Franchise-wise report for one executive. Show calls pending for:",
+            "tech": "Technician-wise report for one franchise. Show calls pending for:",
             "ageing": "Ageing summary: each day from 0 up to N, then '>N-1 days' and '>N days' columns. Choose N:"
             }.get(action, "Show calls pending for:")
     if action == "ageing":
@@ -114,7 +145,7 @@ def ask_age(to, action):
     send_buttons(to, body, btns)
 
 def ask_types(to, s):
-    send_buttons(to, f"Calls older than {s['min_days']} days. Apply the standard filters?\n\n"
+    send_buttons(to, f"{age_phrase(s['min_days']).capitalize()}. Apply the standard filters?\n\n"
                      "Standard = ignore Courtesy Visit, Dealer Defective, and pending reasons "
                      "'Request soft closure verification' / 'Cancellation Request verification'.",
                  [("filt_std", "Standard filters"), ("filt_none", "No filters")])
@@ -146,11 +177,11 @@ def generate_csat(to, s):
 def ask_executive(to, s):
     ex = eng.list_executives(s["file"], s["min_days"])
     if ex.empty:
-        send_text(to, f"No calls older than {s['min_days']} days after the standard filters.")
+        send_text(to, f"No {age_phrase(s['min_days'])} after the standard filters.")
         finish(to)
         return
     s["exec_names"] = list(ex.index)[:10]
-    rows = [(f"exec_{i}", n.title()[:24], f"{int(ex[n])} calls past {s['min_days']} days")
+    rows = [(f"exec_{i}", n.title()[:24], f"{int(ex[n])} calls{desc_age(s['min_days'])}")
             for i, n in enumerate(s["exec_names"])]
     s["stage"] = "exec"
     send_list(to, "Which executive? Pick one, or type a name.", "Choose executive", rows)
@@ -173,6 +204,63 @@ def generate_csat_exec(to, s):
     send_image(to, png, summary) if png else send_text(to, summary)
     finish(to)
 
+def ask_list_executive(to, s):
+    ex = eng.list_executives(s["file"], -1)
+    if ex.empty:
+        send_text(to, "No pending calls found after the standard filters.")
+        finish(to)
+        return
+    s["lexec_names"] = list(ex.index)[:10]
+    rows = [(f"lexec_{i}", n.title()[:24], f"{int(ex[n])} pending calls") for i, n in enumerate(s["lexec_names"])]
+    s["stage"] = "lists_pick"
+    send_list(to, "Call lists for which executive's franchises? Pick one, or type a name.", "Choose executive", rows)
+
+def generate_lists(to, s, name):
+    send_text(to, f"Building call lists for {name.title()}'s franchises...")
+    pages, n_fr = ins.franchise_call_lists(s["file"], name)
+    if not pages:
+        send_text(to, f"No pending calls for {name.title()} after the standard filters.")
+        finish(to)
+        return
+    send_text(to, f"Sending {len(pages)} image{'s' if len(pages) != 1 else ''} for {n_fr} "
+                  f"franchise{'s' if n_fr != 1 else ''}, A to Z. "
+                  "Red rows are 2+ days old; 0 and 1 day are red text. (standard filters applied)")
+    for png, cap in pages:
+        try:
+            send_image(to, png, cap)
+        except Exception as e:                    # one failed image must not stop the rest
+            print("call-list image failed:", repr(e))
+            send_text(to, f"Could not send the image for {cap.split(':')[0]}.")
+        time.sleep(0.4)
+    finish(to)
+
+def age_phrase(n):
+    return "pending calls" if n < 0 else f"calls older than {n} days"
+
+def desc_age(n):
+    return "" if n < 0 else f" past {n} days"
+
+def ask_franchise(to, s):
+    fr = eng.list_franchises(s["file"], s["min_days"])
+    if fr.empty:
+        send_text(to, f"No {age_phrase(s['min_days'])} after the standard filters.")
+        finish(to)
+        return
+    if len(fr) == 1:                              # single-franchise file: no need to ask
+        generate_tech(to, s, fr.index[0])
+        return
+    s["fr_names"] = list(fr.index)[:10]
+    rows = [(f"fran_{i}", n.title()[:24], f"{n.title()} ({int(fr[n])} calls)"[:72])
+            for i, n in enumerate(s["fr_names"])]
+    s["stage"] = "fran_pick"
+    send_list(to, "Which franchise? Pick one, or type part of its name.", "Choose franchise", rows)
+
+def generate_tech(to, s, name):
+    send_text(to, f"Building {name.title()}'s technician-wise report...")
+    png, summary = eng.make_report(s["file"], s["min_days"], franchise=name)
+    send_image(to, png, summary + "\n(standard filters applied, mandatory calls excluded)") if png else send_text(to, summary)
+    finish(to)
+
 def finish(to):
     send_text(to, "Send another Excel any time, or type *hi* to start over.")
     sessions.pop(to, None)
@@ -185,6 +273,8 @@ def after_age(to, s):
         ask_executive(to, s)
     elif s.get("action") == "ageing":
         generate_ageing(to, s)
+    elif s.get("action") == "tech":
+        ask_franchise(to, s)
     else:
         ask_types(to, s)
 
@@ -208,6 +298,8 @@ def handle(msg):
             rtype = ins.detect_report_type(data)
             if rtype == "pending":
                 eng.load_report(data)                     # validate now, not later
+            elif rtype == "softclosure":
+                ins.load_soft_closure(data)
         except Exception as e:
             send_text(to, f"I couldn't read that file: {e}")
             sessions.pop(to, None)
@@ -217,12 +309,14 @@ def handle(msg):
             s["stage"] = "action"; ask_action(to)
         elif rtype == "csat":
             s["stage"] = "csat"; ask_csat(to)
+        elif rtype == "softclosure":
+            s["stage"] = "soft"; ask_soft(to)
         elif rtype == "registered":
             send_text(to, "I recognise this as the *Calls Registered* report. I can't summarise it yet - "
                           "tell the developer what you want from it and it will be added next.")
             sessions.pop(to, None)
         else:
-            send_text(to, "I don't recognise this file. Send the *Pending call* or *Customer satisfaction score* Excel.")
+            send_text(to, "I don't recognise this file. Send the *Pending call*, *Customer satisfaction score* or *Soft Closure* Excel.")
             sessions.pop(to, None)
         return
 
@@ -235,7 +329,7 @@ def handle(msg):
 
     if text.lower() in ("hi", "hello", "menu", "start", "cancel"):
         sessions.pop(to, None)
-        send_text(to, "Hi! Send me the *Pending call* or *Customer satisfaction score* Excel from the portal.")
+        send_text(to, "Hi! Send me the *Pending call*, *Customer satisfaction score* or *Soft Closure* Excel from the portal.")
         return
 
     if s["stage"] == "csat" and reply in ("csat_exec", "csat_exfr", "csat_fr"):
@@ -256,14 +350,60 @@ def handle(msg):
             send_text(to, "More than one match: " + ", ".join(n.title() for n in names) + ". Type a fuller name.")
         else:
             send_text(to, f"No executive matching '{text}' in this file. Try another name.")
-    elif s["stage"] == "action" and reply in ("act_pivot", "act_ageing", "act_chase", "act_exec"):
-        s["action"] = {"act_pivot": "pivot", "act_ageing": "ageing", "act_chase": "chase", "act_exec": "exec"}[reply]
+    elif s["stage"] == "soft" and reply in ("soft_exec", "soft_all", "soft_exfr"):
+        if reply == "soft_exfr":
+            ask_soft_executive(to, s)
+        else:
+            generate_soft(to, s, reply)
+    elif s["stage"] == "soft_pick" and reply and reply.startswith("sexec_"):
+        generate_soft(to, s, "soft_exfr", s["sexec_names"][int(reply.split("_")[1])])
+    elif s["stage"] == "soft_pick" and text:
+        q = text.lower()
+        names = [n for n in ins.soft_closure_executives(s["file"]).index if q in n.lower()]
+        if len(names) == 1:
+            generate_soft(to, s, "soft_exfr", names[0])
+        elif names:
+            send_text(to, "More than one match: " + ", ".join(n.title() for n in names) + ". Type a fuller name.")
+        else:
+            send_text(to, f"No executive matching '{text}' in this file. Try another name.")
+    elif s["stage"] == "fran_pick" and reply and reply.startswith("fran_"):
+        generate_tech(to, s, s["fr_names"][int(reply.split("_")[1])])
+    elif s["stage"] == "fran_pick" and text:
+        q = text.lower()
+        names = [n for n in eng.list_franchises(s["file"], s["min_days"]).index if q in n.lower()]
+        if len(names) == 1:
+            generate_tech(to, s, names[0])
+        elif 1 < len(names) <= 6:
+            send_text(to, "More than one match: " + ", ".join(n.title() for n in names) + ". Type a fuller name.")
+        elif names:
+            send_text(to, f"{len(names)} franchises match. Type more of the name.")
+        else:
+            send_text(to, f"No franchise matching '{text}' has {age_phrase(s['min_days'])}. Try another name.")
+    elif s["stage"] == "lists_pick" and reply and reply.startswith("lexec_"):
+        generate_lists(to, s, s["lexec_names"][int(reply.split("_")[1])])
+    elif s["stage"] == "lists_pick" and text:
+        q = text.lower()
+        names = [n for n in eng.list_executives(s["file"], -1).index if q in n.lower()]
+        if len(names) == 1:
+            generate_lists(to, s, names[0])
+        elif names:
+            send_text(to, "More than one match: " + ", ".join(n.title() for n in names) + ". Type a fuller name.")
+        else:
+            send_text(to, f"No executive matching '{text}' has pending calls. Try another name.")
+    elif s["stage"] == "action" and reply == "act_lists":
+        s["action"] = "lists"; ask_list_executive(to, s)
+    elif s["stage"] == "action" and reply in ("act_pivot", "act_ageing", "act_chase", "act_exec", "act_tech"):
+        s["action"] = {"act_pivot": "pivot", "act_ageing": "ageing", "act_chase": "chase", "act_exec": "exec",
+                       "act_tech": "tech"}[reply]
         s["stage"] = "age"; ask_age(to, s["action"])
     elif s["stage"] == "age" and reply and reply.startswith("age_") and reply != "age_custom":
         s["min_days"] = int(reply.split("_")[1]); after_age(to, s)
     elif s["stage"] == "age" and reply == "age_custom":
         s["stage"] = "age_number"
-        send_text(to, "Type the number of days. e.g. *5* means calls pending more than 5 days.")
+        extra = " For every pending call, type *all*." if s.get("action") in ("pivot", "exec", "tech") else ""
+        send_text(to, "Type the number of days. e.g. *5* means calls pending more than 5 days." + extra)
+    elif s["stage"] == "age_number" and text.lower() == "all" and s.get("action") in ("pivot", "exec", "tech"):
+        s["min_days"] = -1; after_age(to, s)
     elif s["stage"] == "age_number" and text.isdigit():
         s["min_days"] = int(text); after_age(to, s)
     elif s["stage"] == "exec" and reply and reply.startswith("exec_"):
@@ -276,18 +416,18 @@ def handle(msg):
         elif names:
             send_text(to, "More than one match: " + ", ".join(n.title() for n in names) + ". Type a fuller name.")
         else:
-            send_text(to, f"No executive matching '{text}' has calls older than {s['min_days']} days. Try another name.")
+            send_text(to, f"No executive matching '{text}' has {age_phrase(s['min_days'])}. Try another name.")
     elif s["stage"] == "types" and reply in ("filt_std", "filt_none"):
         s["filters"] = reply
         generate(to, s)
     elif s["stage"] == "idle":
-        send_text(to, "Send me the *Pending call* or *Customer satisfaction score* Excel to get started.")
+        send_text(to, "Send me the *Pending call*, *Customer satisfaction score* or *Soft Closure* Excel to get started.")
     else:
         send_text(to, "Please use the options above, or type *hi* to start over.")
 
 
 # --------------------------------------------------------------- webhook
-VERSION = "2026-11-11-v6-need-zero-green"
+VERSION = "2026-11-19-v11-franchise-call-lists"
 
 @app.get("/version")
 def version():
