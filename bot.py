@@ -122,7 +122,8 @@ def ask_soft(to):
     send_list(to, "Got the soft closure file. What do you need?", "Choose report",
               [("soft_exec", "Closed: by executive", "Executives x days taken, with total"),
                ("soft_all", "All executives combined", "Closed calls by call type"),
-               ("soft_exfr", "Executive's franchises", "Franchise x days, one executive")])
+               ("soft_exfr", "Executive's franchises", "Franchise x days, one executive"),
+               ("soft_tech", "Franchise technicians", "Pick executive, then each franchise")])
 
 def ask_soft_executive(to, s):
     ex = ins.soft_closure_executives(s["file"])
@@ -134,6 +135,40 @@ def ask_soft_executive(to, s):
     rows = [(f"sexec_{i}", n.title()[:24], f"{int(ex[n])} calls closed") for i, n in enumerate(s["sexec_names"])]
     s["stage"] = "soft_pick"
     send_list(to, "Which executive? Pick one, or type a name.", "Choose executive", rows)
+
+SPAGE = 8   # 8 franchises + "More" + "Done" = 10 rows (WhatsApp list limit)
+
+def pick_soft_executive(to, s, name):
+    """Executive chosen in the soft closure flow: franchise-wise report, or the technician franchise picker."""
+    if s.get("soft_mode") == "tech":
+        fr = ins.soft_closure_franchise_counts(s["file"], name)
+        if fr.empty:
+            send_text(to, f"No soft closed calls for {name.title()} on the report day after the exclusions.")
+            finish(to)
+            return
+        s["sexec"], s["sfr_names"], s["sfr_counts"] = name, list(fr.index), fr
+        ask_soft_franchise(to, s, 0)
+    else:
+        generate_soft(to, s, "soft_exfr", name)
+
+def ask_soft_franchise(to, s, page=0):
+    names, cnt = s["sfr_names"], s["sfr_counts"]
+    chunk = names[page * SPAGE:(page + 1) * SPAGE]
+    rows = [(f"sfr_{page * SPAGE + i}", f"{page * SPAGE + i + 1}. {n.title()}"[:24], f"{int(cnt[n])} calls closed")
+            for i, n in enumerate(chunk)]
+    left = len(names) - (page + 1) * SPAGE
+    if left > 0:
+        rows.append((f"sfrpage_{page + 1}", "More franchises >", f"{left} more"))
+    rows.append(("sfr_done", "Done", "Finish"))
+    s["stage"], s["spage"] = "soft_fran", page
+    send_list(to, f"{s['sexec'].title()}: tap a franchise for its technician-wise closed calls, or type part of a name.",
+              "Choose franchise", rows)
+
+def generate_soft_tech(to, s, franchise):
+    send_text(to, f"Building the technician-wise report for {franchise.title()}...")
+    png, summary = ins.soft_closure_technicians(s["file"], s["sexec"], franchise)
+    send_image(to, png, summary) if png else send_text(to, summary)
+    ask_soft_franchise(to, s, s.get("spage", 0))      # back to the picker; session stays open
 
 def generate_soft(to, s, kind, name=None):
     send_text(to, "Building the soft closure report...")
@@ -451,18 +486,19 @@ def handle(msg):
             send_text(to, "More than one match: " + ", ".join(n.title() for n in names) + ". Type a fuller name.")
         else:
             send_text(to, f"No executive matching '{text}' in this file. Try another name.")
-    elif s["stage"] == "soft" and reply in ("soft_exec", "soft_all", "soft_exfr"):
-        if reply == "soft_exfr":
+    elif s["stage"] == "soft" and reply in ("soft_exec", "soft_all", "soft_exfr", "soft_tech"):
+        if reply in ("soft_exfr", "soft_tech"):
+            s["soft_mode"] = "tech" if reply == "soft_tech" else "exfr"
             ask_soft_executive(to, s)
         else:
             generate_soft(to, s, reply)
     elif s["stage"] == "soft_pick" and reply and reply.startswith("sexec_"):
-        generate_soft(to, s, "soft_exfr", s["sexec_names"][int(reply.split("_")[1])])
+        pick_soft_executive(to, s, s["sexec_names"][int(reply.split("_")[1])])
     elif s["stage"] == "soft_pick" and text:
         q = text.lower()
         names = [n for n in ins.soft_closure_executives(s["file"]).index if q in n.lower()]
         if len(names) == 1:
-            generate_soft(to, s, "soft_exfr", names[0])
+            pick_soft_executive(to, s, names[0])
         elif names:
             send_text(to, "More than one match: " + ", ".join(n.title() for n in names) + ". Type a fuller name.")
         else:
@@ -480,6 +516,23 @@ def handle(msg):
             send_text(to, f"{len(names)} franchises match. Type more of the name.")
         else:
             send_text(to, f"No franchise matching '{text}' has {age_phrase(s['min_days'])}. Try another name.")
+    elif s["stage"] == "soft_fran" and reply == "sfr_done":
+        finish(to)
+    elif s["stage"] == "soft_fran" and reply and reply.startswith("sfrpage_"):
+        ask_soft_franchise(to, s, int(reply.split("_")[1]))
+    elif s["stage"] == "soft_fran" and reply and reply.startswith("sfr_"):
+        generate_soft_tech(to, s, s["sfr_names"][int(reply.split("_")[1])])
+    elif s["stage"] == "soft_fran" and text:
+        q = text.lower()
+        names = [n for n in s["sfr_names"] if q in n.lower()]
+        if len(names) == 1:
+            generate_soft_tech(to, s, names[0])
+        elif 1 < len(names) <= 6:
+            send_text(to, "More than one match: " + ", ".join(n.title() for n in names) + ". Type a fuller name.")
+        elif names:
+            send_text(to, f"{len(names)} franchises match. Type more of the name.")
+        else:
+            send_text(to, f"No franchise matching '{text}'. Try another name, or type *hi* to start over.")
     elif s["stage"] == "mand" and reply == "mex_done":
         finish(to)
     elif s["stage"] == "mand" and reply and reply.startswith("mexpage_"):
@@ -574,7 +627,7 @@ def handle(msg):
 
 
 # --------------------------------------------------------------- webhook
-VERSION = "2026-11-19-v17-pending-keep-10min"
+VERSION = "2026-11-19-v18-soft-technicians"
 
 @app.get("/version")
 def version():
