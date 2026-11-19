@@ -171,21 +171,29 @@ def _excel_3_colour_scale(values, reverse=False):
     return out
 
 
-def render_image(pv: pd.DataFrame, title: str = "", row_label: str = "Row Labels") -> bytes:
-    """Draws the pivot like the Excel screenshot and returns PNG bytes."""
+def render_image(pv: pd.DataFrame, title: str = "", row_label: str = "Row Labels", ge_days=None) -> bytes:
+    """Draws the pivot like the Excel screenshot and returns PNG bytes.
+    ge_days=2 adds a '>=2 Days' column after Grand Total (calls that are 2+ days old)."""
     if not SHOW_IMAGE_TITLE:
         title = ""
     body = pv.iloc[:-1]
-    cols = [row_label] + [str(c) for c in pv.columns[:-1]] + ["Grand Total"]
+    day_cols = list(pv.columns[:-1])
+    cols = [row_label] + [str(c) for c in day_cols] + ["Grand Total"]
+    ge = None
+    if ge_days is not None:
+        keep = [c for c in day_cols if isinstance(c, str) or int(c) >= ge_days]   # "30+" tail counts too
+        ge = pv[keep].sum(axis=1) if keep else pd.Series(0, index=pv.index)
+        cols.append(f">={ge_days} Days")
     n_rows, n_cols = len(pv) + 1, len(cols)
+    n_days = len(day_cols)
 
     name_w = max(3.6, 0.13 * max(len(s) for s in pv.index) + 0.6)
-    fig_w = name_w + 0.55 * (n_cols - 2) + 1.3
+    widths = [name_w] + [0.55] * n_days + [1.3] + ([1.1] if ge is not None else [])
+    fig_w = sum(widths) + 0.1
     fig_h = 0.42 * n_rows + (0.55 if title else 0.15)
     fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=120)
     ax.axis("off")
 
-    widths = [name_w] + [0.55] * (n_cols - 2) + [1.3]
     total_w = sum(widths)
     x_edges = np.cumsum([0] + widths) / total_w
     row_h = 1.0 / (n_rows + (1.2 if title else 0))
@@ -207,18 +215,24 @@ def render_image(pv: pd.DataFrame, title: str = "", row_label: str = "Row Labels
     for c, h in enumerate(cols):
         cell(0, c, h, header_bg, True)
 
+    gt_col = n_days + 1
     totals = body["Grand Total"].values
     colours = _excel_3_colour_scale(totals)
+    ge_colours = _excel_3_colour_scale(ge.loc[body.index].values) if ge is not None else None
     for r, (name, row) in enumerate(body.iterrows(), start=1):
         cell(r, 0, name, ha="center")
         for c, v in enumerate(row.values[:-1], start=1):
             cell(r, c, "" if v == 0 else str(v))
-        cell(r, n_cols - 1, str(row.values[-1]), colours[r - 1])
+        cell(r, gt_col, str(row.values[-1]), colours[r - 1])
+        if ge is not None:
+            cell(r, gt_col + 1, str(int(ge[name])), ge_colours[r - 1])
 
     last = n_rows - 1
     cell(last, 0, "Grand Total", total_bg, True)
     for c, v in enumerate(pv.loc["Grand Total"].values, start=1):
         cell(last, c, str(v), total_bg, True)
+    if ge is not None:
+        cell(last, gt_col + 1, str(int(ge["Grand Total"])), total_bg, True)
 
     ax.set_xlim(0, 1); ax.set_ylim(0, 1)
     buf = io.BytesIO()
@@ -290,7 +304,7 @@ def make_report(source, min_days=3, standard_filters=True, call_type_filter=None
     if pv is None:
         return None, f"No calls found ({age}){who} with those filters."
     title = f"Pending calls{who} - {age}" + ("" if standard_filters else " (no filters)")
-    png = render_image(pv, title, row_label)
+    png = render_image(pv, title, row_label, ge_days=2 if (executive and not franchise) else None)
     total = int(pv.loc["Grand Total", "Grand Total"])
     n = len(pv) - 1
     if franchise:
