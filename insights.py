@@ -357,13 +357,13 @@ def csat_by_executive(source):
     src = io.BytesIO(source) if isinstance(source, (bytes, bytearray)) else source
     dates = re.findall(r"\d+/\d+/\d{4}", str(pd.read_excel(src, header=None, nrows=2).iloc[1, 0]))
     period = f" | {dates[0]} to {dates[-1]}" if dates else ""
-    title = f"CSS = (Happy - Not happy) / Total incl. OK{period}"
+    title = f"CSS{period}"
     png = _table_png(headers, rows, widths, title, colour_cols=colours, total_row=True, total_colours=total_colours)
     low = g.index[0]
     yet = ", ".join(f"{need_tot[t]} for {t}%" for t in CSS_TARGETS)
     summary = (f"CSS overall {tot_css*100:.0f}% on {int(tot['Total'])} responses. "
                f"Lowest: {low.title()} {g.loc[low, 'CSS']*100:.0f}%.\n"
-               f"Extra HAPPY still needed (sum of executives): {yet}.\nCSS = (Happy - Not happy) / Total incl. OK")
+               f"Happy responses still needed: {yet}.")
     return png, summary
 
 
@@ -449,9 +449,7 @@ def csat_franchise_css(source, executive=None, targets=CSS_TARGETS):
     below = int((g["CSS"] * 100 < main).sum())
     yet = ", ".join(f"{need_tot[t]} for {t}%" for t in targets)
     summary = (f"{who}CSS {tot_css*100:.1f}% on {int(tot['Total'])} responses across {len(g)} franchises. "
-               f"Below {main}%: {below}. Extra HAPPY still needed (sum of franchises): {yet}.\n"
-               f"CSS = (Happy - Not happy) / Total incl. OK. Yet to get X% = extra HAPPY needed per franchise "
-               f"(0 = already at target).")
+               f"Below {main}%: {below}. Happy responses still needed: {yet}.")
     return png, summary
 
 
@@ -841,8 +839,7 @@ def _mand_table(df, by, label, who=""):
     best, worst = g.index[0], g.index[-1]
     summary = (f"{who}Mandatory appointments: {int(tot['Total'])} calls, {int(tot['Visit Done'])} visits done "
                f"(MC {tot_mc*100:.0f}%). Best: {best.title()} {g.loc[best, 'MC']*100:.0f}%. "
-               f"Lowest: {worst.title()} {g.loc[worst, 'MC']*100:.0f}%.\n"
-               f"MC % = Visit Done / Grand Total.")
+               f"Lowest: {worst.title()} {g.loc[worst, 'MC']*100:.0f}%.")
     return png, summary
 
 
