@@ -704,28 +704,39 @@ def _call_list_scope(source, executive):
                     _fr=d["Franchise Name"].fillna("(no franchise)").astype(str).str.strip())
 
 
-def call_list_franchises(source, executive):
-    """Franchises of one executive with pending calls, A to Z -> pandas Series {name: call count}."""
+def call_list_franchises(source, executive, min_age=0):
+    """Franchises of one executive with pending calls (DAYS OLD >= min_age), A to Z -> Series {name: count}."""
     d = _call_list_scope(source, executive)
+    if not d.empty and min_age:
+        d = d[d["DAYS OLD"] >= min_age]
     if d.empty:
         return pd.Series(dtype=int)
     c = d["_fr"].value_counts()
     return c.reindex(sorted(c.index, key=str.lower))
 
 
-def franchise_call_list(source, executive, franchise):
-    """Call list image(s) for ONE franchise of an executive. Returns [(png, caption), ...]."""
+def franchise_call_list(source, executive, franchise, min_age=0):
+    """Call list image(s) for ONE franchise, or a GROUP of franchises combined (pass a list of names).
+    min_age=2 keeps only calls 2+ days old. Returns [(png, caption), ...]."""
+    names = [franchise] if isinstance(franchise, str) else list(franchise)
+    want = {n.strip().lower() for n in names}
     d = _call_list_scope(source, executive)
-    g = d[d["_fr"].str.lower() == franchise.strip().lower()] if not d.empty else d
+    g = d[d["_fr"].str.lower().isin(want)] if not d.empty else d
+    if not g.empty and min_age:
+        g = g[g["DAYS OLD"] >= min_age]
     if g.empty:
         return []
-    name = g["_fr"].iloc[0]
-    g = g.sort_values(["DAYS OLD", "_cb"], ascending=[False, False])
+    shown = sorted(g["_fr"].unique(), key=str.lower)
+    label = shown[0] if len(shown) == 1 else " + ".join(shown)
+    if len(label) > 120:
+        label = f"{len(shown)} franchises"
+    g = g.assign(_k=g["_fr"].str.lower()).sort_values(["_k", "DAYS OLD", "_cb"], ascending=[True, False, False])
     red = int((g["DAYS OLD"] >= CALL_LIST_RED_FROM).sum())
     chunks = [g.iloc[i:i + CALL_LIST_PAGE_ROWS] for i in range(0, len(g), CALL_LIST_PAGE_ROWS)]
+    note = f" | only {min_age}+ days old" if min_age else ""
     pages = []
     for i, ch in enumerate(chunks, start=1):
-        cap = (f"{name}: {len(g)} pending call{'s' if len(g) != 1 else ''} | "
+        cap = (f"{label}: {len(g)} pending call{'s' if len(g) != 1 else ''}{note} | "
                f"{red} at {CALL_LIST_RED_FROM}+ days (red)")
         if len(chunks) > 1:
             cap += f" | part {i} of {len(chunks)}"
