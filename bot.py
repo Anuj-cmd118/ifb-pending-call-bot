@@ -158,6 +158,8 @@ def ask_age(to, action):
             }.get(action, "Show calls pending for:")
     if action == "ageing":
         btns = [("age_3", "Up to 3 days"), ("age_4", "Up to 4 days"), ("age_custom", "Other / custom")]
+    elif action == "exec":                      # includes 0-day calls via "All incl. 0 days"
+        btns = [("age_-1", "All incl. 0 days"), ("age_3", "More than 3 days"), ("age_custom", "Other / custom")]
     else:
         btns = [("age_2", "More than 2 days"), ("age_3", "More than 3 days"), ("age_custom", "Other / custom")]
     send_buttons(to, body, btns)
@@ -339,6 +341,8 @@ def handle(msg):
                 df = eng.load_report(data)                # parse ONCE; cached for every later click
             elif rtype == "softclosure":
                 ins.load_soft_closure(data)
+            elif rtype == "mandatory":
+                ins.load_mandatory(data)
         except Exception as e:
             send_text(to, f"I couldn't read that file: {e}")
             sessions.pop(to, None)
@@ -351,12 +355,17 @@ def handle(msg):
             s["stage"] = "csat"; ask_csat(to)
         elif rtype == "softclosure":
             s["stage"] = "soft"; ask_soft(to)
+        elif rtype == "mandatory":
+            send_text(to, "Building the Mandatory appointments report...")
+            png, summary = ins.mandatory_appointments(data)
+            send_image(to, png, summary) if png else send_text(to, summary)
+            finish(to)
         elif rtype == "registered":
             send_text(to, "I recognise this as the *Calls Registered* report. I can't summarise it yet - "
                           "tell the developer what you want from it and it will be added next.")
             sessions.pop(to, None)
         else:
-            send_text(to, "I don't recognise this file. Send the *Pending call*, *Customer satisfaction score* or *Soft Closure* Excel.")
+            send_text(to, "I don't recognise this file. Send the *Pending call*, *Customer satisfaction score*, *Soft Closure* or *Mandatory Appointment* Excel.")
             sessions.pop(to, None)
         return
 
@@ -369,7 +378,7 @@ def handle(msg):
 
     if text.lower() in ("hi", "hello", "menu", "start", "cancel"):
         sessions.pop(to, None)
-        send_text(to, "Hi! Send me the *Pending call*, *Customer satisfaction score* or *Soft Closure* Excel from the portal.")
+        send_text(to, "Hi! Send me the *Pending call*, *Customer satisfaction score*, *Soft Closure* or *Mandatory Appointment* Excel from the portal.")
         return
 
     if s["stage"] == "csat" and reply in ("csat_exec", "csat_exfr", "csat_fr"):
@@ -478,13 +487,13 @@ def handle(msg):
         s["filters"] = reply
         generate(to, s)
     elif s["stage"] == "idle":
-        send_text(to, "Send me the *Pending call*, *Customer satisfaction score* or *Soft Closure* Excel to get started.")
+        send_text(to, "Send me the *Pending call*, *Customer satisfaction score*, *Soft Closure* or *Mandatory Appointment* Excel to get started.")
     else:
         send_text(to, "Please use the options above, or type *hi* to start over.")
 
 
 # --------------------------------------------------------------- webhook
-VERSION = "2026-11-19-v12-cached-df-pick-franchise"
+VERSION = "2026-11-19-v13-mandatory-css96"
 
 @app.get("/version")
 def version():
