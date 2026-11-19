@@ -22,9 +22,13 @@ COL_TYPE = "Call Type"
 COL_STATUS = "Status"
 
 COL_REASON = "Pending Reason"
+COL_FRANCHISE = "Franchise Name"
+COL_TECH = "Technician Name"
 
 # IFB standard filters: these are ALWAYS ignored in the daily report
 STD_EXCLUDE_TYPES = ["COURTESY VISIT", "DEALER DEFECTIVE REQUEST"]
+# Extra exclusion used ONLY by the franchise technician report:
+TECH_EXTRA_EXCLUDE_TYPES = ["MANDATORY CALLS", "MANDATORY CALL"]
 STD_EXCLUDE_REASONS = ["Request soft closure verification",
                        "Cancellation Request verification"]
 
@@ -86,6 +90,8 @@ def load_report(source) -> pd.DataFrame:
     # The portal repeats a ticket once per spare-part line, so count each ticket once.
     if "Ticket No" in df.columns:
         df = df.drop_duplicates(subset="Ticket No", keep="first")
+    if COL_TYPE in df.columns:                      # so "Mandatory Calls" / "mandatory calls " both match
+        df[COL_TYPE] = df[COL_TYPE].astype(str).str.strip().str.upper()
     return drop_excluded_executives(df, COL_EXEC)
 
 
@@ -230,33 +236,65 @@ def list_executives(source, min_days=3, standard_filters=True):
     return pv["Grand Total"].drop("Grand Total")
 
 
+def list_franchises(source, min_days=3, standard_filters=True):
+    """Franchises that have calls older than min_days (-1 = all pending), most calls first."""
+    df = load_report(source) if isinstance(source, (bytes, bytearray, str)) else source
+    pv = build_pivot(df, min_days,
+                     exclude_types=(STD_EXCLUDE_TYPES + TECH_EXTRA_EXCLUDE_TYPES) if standard_filters else None,
+                     exclude_reasons=STD_EXCLUDE_REASONS if standard_filters else None,
+                     index_col=COL_FRANCHISE)
+    if pv is None:
+        return pd.Series(dtype=int)
+    return pv["Grand Total"].drop("Grand Total")
+
+
 def make_report(source, min_days=3, standard_filters=True, call_type_filter=None,
-                status_filter=None, max_days=None, executive=None):
+                status_filter=None, max_days=None, executive=None, franchise=None):
     """One-call helper used by the bot. Returns (png_bytes | None, summary_text).
     standard_filters=True applies the IFB exclusions (courtesy visit, dealer
     defective, soft-closure / cancellation verification).
-    executive="CHENDRA C" -> that executive's calls, broken down FRANCHISE-wise."""
+    executive="CHENDRA C" -> that executive's calls, broken down FRANCHISE-wise.
+    franchise="AYAAN ASSOCIATES" -> that franchise's calls, broken down TECHNICIAN-wise.
+    min_days < 0 means all pending calls (no age limit)."""
     df = load_report(source)
-    index_col = COL_EXEC
-    if executive:
+    index_col, row_label = COL_EXEC, "Row Labels"
+    if franchise:
+        df = df[df[COL_FRANCHISE].astype(str).str.strip().str.lower() == franchise.strip().lower()].copy()
+        tech = df[COL_TECH] if COL_TECH in df.columns else pd.Series(index=df.index, dtype=object)
+        code = df["TECHNICIAN CODE"] if "TECHNICIAN CODE" in df.columns else pd.Series(index=df.index, dtype=object)
+        names = tech.fillna(code).astype(str).str.strip().replace({"": "(no technician)", "nan": "(no technician)"})
+        df["_Tech"] = names.where(tech.notna() | code.notna(), "(no technician)")
+        index_col, row_label = "_Tech", "Technician"
+    elif executive:
         df = df[df[COL_EXEC].str.lower() == executive.strip().lower()]
-        index_col = "Franchise Name"
+        index_col, row_label = COL_FRANCHISE, "Franchise"
     ex_t = STD_EXCLUDE_TYPES if standard_filters else None
+    if franchise and standard_filters:              # technician report: mandatory calls are removed as well
+        ex_t = STD_EXCLUDE_TYPES + TECH_EXTRA_EXCLUDE_TYPES
     ex_r = STD_EXCLUDE_REASONS if standard_filters else None
     pv = build_pivot(df, min_days, call_type_filter, status_filter, max_days,
                      exclude_types=ex_t, exclude_reasons=ex_r, index_col=index_col)
-    who = f" for {executive.title()}" if executive else ""
+    age = "all pending calls" if min_days < 0 else f"more than {min_days} days old"
+    who = ""
+    if franchise:
+        who = f" for {franchise.title()}"
+    elif executive:
+        who = f" for {executive.title()}"
     if pv is None:
-        return None, f"No calls found that are more than {min_days} days old{who} with those filters."
-    age = f"more than {min_days} days old"
-    title = (f"Pending calls - {executive.title()} - {age}" if executive else f"Pending calls - {age}")
-    title += "" if standard_filters else " (no filters)"
-    png = render_image(pv, title, "Franchise" if executive else "Row Labels")
+        return None, f"No calls found ({age}){who} with those filters."
+    title = f"Pending calls{who} - {age}" + ("" if standard_filters else " (no filters)")
+    png = render_image(pv, title, row_label)
     total = int(pv.loc["Grand Total", "Grand Total"])
-    if executive:
-        summary = f"{executive.title()}: {total} pending calls ({age}) across {len(pv) - 1} franchises."
+    n = len(pv) - 1
+    if franchise:
+        summary = f"{franchise.title()}: {total} pending calls ({age}) across {n} technicians."
+        execs = [x for x in df[COL_EXEC].dropna().unique()]
+        if len(execs) == 1:
+            summary += f" Executive: {str(execs[0]).title()}."
+    elif executive:
+        summary = f"{executive.title()}: {total} pending calls ({age}) across {n} franchises."
     else:
-        summary = f"{total} pending calls ({age}) across {len(pv) - 1} executives."
+        summary = f"{total} pending calls ({age}) across {n} executives."
     return png, summary
 
 
