@@ -10,6 +10,7 @@ Flow
 Run:  python bot.py        (then expose port 5000 with ngrok / a server)
 """
 import os
+import re
 import threading
 import traceback
 import time
@@ -236,41 +237,56 @@ def ask_list_executive(to, s):
     send_list(to, "Call lists for which executive's franchises? Pick one, or type a name.", "Choose executive", rows)
 
 LPAGE = 8   # 8 franchises + "More" + "Done" = 10 rows (WhatsApp list limit)
+LGROUP_MAX = 3
 
 def ask_list_franchise(to, s, page=0):
     names, cnt = s["lfr_names"], s["lfr_counts"]
     chunk = names[page * LPAGE:(page + 1) * LPAGE]
-    rows = [(f"lfr_{page * LPAGE + i}", n.title()[:24], f"{int(cnt[n])} pending calls")
+    rows = [(f"lfr_{page * LPAGE + i}", f"{page * LPAGE + i + 1}. {n.title()}"[:24], f"{int(cnt[n])} pending calls")
             for i, n in enumerate(chunk)]
     left = len(names) - (page + 1) * LPAGE
     if left > 0:
         rows.append((f"lfrpage_{page + 1}", "More franchises >", f"{left} more"))
     rows.append(("lfr_done", "Done", "Finish"))
     s["stage"], s["lpage"] = "lists_fran", page
-    send_list(to, f"{s['lexec'].title()}: pick a franchise for its call list (or type part of its name).",
+    mode = "2+ days only" if s.get("lmin") else "all calls"
+    send_list(to, f"{s['lexec'].title()} ({mode}): tap a franchise, or type numbers like *2,5* "
+                  f"(up to {LGROUP_MAX}) to get each as its own image in one go.",
               "Choose franchise", rows)
 
 def generate_lists(to, s, name):
-    fr = ins.call_list_franchises(s["df"], name)
+    s["lexec"] = name
+    s["stage"] = "lists_age"
+    send_buttons(to, f"{name.title()}: which calls should the lists include?",
+                 [("lage_0", "All calls"), ("lage_2", "2+ days only")])
+
+def start_list_picker(to, s, min_age):
+    s["lmin"] = min_age
+    fr = ins.call_list_franchises(s["df"], s["lexec"], min_age)
     if fr.empty:
-        send_text(to, f"No pending calls for {name.title()} after the standard filters.")
+        send_text(to, f"No {'2+ day old ' if min_age else ''}pending calls for {s['lexec'].title()} after the standard filters.")
         finish(to)
         return
-    s["lexec"], s["lfr_names"], s["lfr_counts"] = name, list(fr.index), fr
+    s["lfr_names"], s["lfr_counts"] = list(fr.index), fr
     ask_list_franchise(to, s, 0)
 
 def generate_list_one(to, s, franchise):
-    send_text(to, f"Building the call list for {franchise.title()}...")
-    pages = ins.franchise_call_list(s["df"], s["lexec"], franchise)
-    if not pages:
-        send_text(to, f"No pending calls for {franchise.title()}.")
-    for png, cap in pages:
-        try:
-            send_image(to, png, cap)
-        except Exception as e:                    # one failed image must not stop the rest
-            print("call-list image failed:", repr(e))
-            send_text(to, f"Could not send the image for {cap.split(':')[0]}.")
-        time.sleep(0.4)
+    """franchise = one name, or a list of 2-3 names: each gets its OWN image(s), sent one after another
+    from a single selection (not combined into one list)."""
+    names = [franchise] if isinstance(franchise, str) else list(franchise)
+    label = names[0].title() if len(names) == 1 else f"{len(names)} franchises (separate images)"
+    send_text(to, f"Building the call list for {label}...")
+    for n in names:
+        pages = ins.franchise_call_list(s["df"], s["lexec"], n, s.get("lmin", 0))
+        if not pages:
+            send_text(to, f"No pending calls for {n.title()}.")
+        for png, cap in pages:
+            try:
+                send_image(to, png, cap)
+            except Exception as e:                # one failed image must not stop the rest
+                print("call-list image failed:", repr(e))
+                send_text(to, f"Could not send the image for {cap.split(':')[0]}.")
+            time.sleep(0.4)
     ask_list_franchise(to, s, s.get("lpage", 0))  # back to the picker; session stays open
 
 def age_phrase(n):
@@ -474,6 +490,20 @@ def handle(msg):
         ask_list_franchise(to, s, int(reply.split("_")[1]))
     elif s["stage"] == "lists_fran" and reply and reply.startswith("lfr_"):
         generate_list_one(to, s, s["lfr_names"][int(reply.split("_")[1])])
+    elif s["stage"] == "lists_age" and reply in ("lage_0", "lage_2"):
+        start_list_picker(to, s, int(reply.split("_")[1]))
+    elif s["stage"] == "lists_fran" and text and re.fullmatch(r"\d+([ ,;+&]+\d+)*", text):
+        idx = []
+        for t in re.findall(r"\d+", text):
+            i = int(t) - 1
+            if i not in idx:
+                idx.append(i)
+        if not all(0 <= i < len(s["lfr_names"]) for i in idx):
+            send_text(to, f"Use numbers between 1 and {len(s['lfr_names'])}, as shown before each franchise name.")
+        elif len(idx) > LGROUP_MAX:
+            send_text(to, f"Combine at most {LGROUP_MAX} franchises at a time.")
+        else:
+            generate_list_one(to, s, [s["lfr_names"][i] for i in idx])
     elif s["stage"] == "lists_fran" and text:
         q = text.lower()
         names = [n for n in s["lfr_names"] if q in n.lower()]
@@ -533,7 +563,7 @@ def handle(msg):
 
 
 # --------------------------------------------------------------- webhook
-VERSION = "2026-11-19-v14-mandatory-franchises"
+VERSION = "2026-11-19-v16-multi-select-separate"
 
 @app.get("/version")
 def version():
@@ -597,4 +627,3 @@ def _safe(msg):
 
 if __name__ == "__main__":
     app.run(port=5000)
-
