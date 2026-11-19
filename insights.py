@@ -502,12 +502,31 @@ def load_soft_closure(source) -> pd.DataFrame:
     df["Exe"] = df["Branch Exe Name"].fillna("(no executive)").astype(str).str.strip().replace("", "(no executive)")
     df["FR"] = df["Franchise Name"].fillna("(no franchise)").astype(str).str.strip()
     df["CT"] = df["Call Type"].fillna("(no type)").astype(str).str.strip().str.upper()
+    tech = df["Technician Name"] if "Technician Name" in df.columns else pd.Series(index=df.index, dtype=object)
+    code = df["TECHNICIAN CODE"] if "TECHNICIAN CODE" in df.columns else pd.Series(index=df.index, dtype=object)
+    t = tech.fillna(code).astype(str).str.replace(r"\s+", " ", regex=True).str.strip().str.upper()
+    df["Tech"] = t.where(tech.notna() | code.notna(), "(NO TECHNICIAN)").replace({"": "(NO TECHNICIAN)", "NAN": "(NO TECHNICIAN)"})
+    return df
+
+
+_SOFT_CACHE = {"key": None, "df": None}     # last parsed soft closure file, so each franchise pick does not re-read the Excel
+
+
+def _soft_loaded(source):
+    if isinstance(source, pd.DataFrame):
+        return source
+    key = hash(bytes(source)) if isinstance(source, (bytes, bytearray)) else None
+    if key is not None and _SOFT_CACHE["key"] == key:
+        return _SOFT_CACHE["df"]
+    df = load_soft_closure(source)
+    if key is not None:
+        _SOFT_CACHE.update(key=key, df=df)
     return df
 
 
 def _soft_scope(source):
     """Calls soft-closed on the report day, after the standard exclusions. Returns (frame, info)."""
-    df = load_soft_closure(source)
+    df = _soft_loaded(source)
     if df.empty:
         raise ValueError("no soft closed calls found in this file")
     day = df["_day"].max()
@@ -603,6 +622,31 @@ def soft_closure_franchises(source, executive):
     s, pct = _same_day(sub)
     summary = (f"{executive.title()}: {len(sub)} calls soft closed on {info['date']} across {len(ct)} franchises"
                f" | same-day {s} ({pct:.0f}%)\n" + _soft_notes(info))
+    return png, summary.strip()
+
+
+def soft_closure_franchise_counts(source, executive):
+    """Franchises of one executive with calls soft closed on the report day (most calls first)."""
+    kept, _ = _soft_scope(source)
+    sub = kept[kept["Exe"].str.lower() == executive.strip().lower()]
+    return sub["FR"].value_counts().sort_values(ascending=False, kind="stable")
+
+
+def soft_closure_technicians(source, executive, franchise):
+    """One franchise's technicians with calls soft closed on the report day: Technician | Closed Calls.
+    Courtesy Visit and Mandatory Calls are already excluded by _soft_scope; no days-taken columns."""
+    kept, info = _soft_scope(source)
+    sub = kept[(kept["Exe"].str.lower() == executive.strip().lower())
+               & (kept["FR"].str.lower() == franchise.strip().lower())]
+    if sub.empty:
+        return None, f"No soft closed calls for {franchise.title()} on {info['date']} after the exclusions."
+    ct = sub["Tech"].value_counts().sort_values(ascending=False, kind="stable")
+    name_w = max(3.6, 0.13 * max(len(str(n)) for n in ct.index) + 0.6)
+    rows = [[n, int(v)] for n, v in ct.items()] + [["Closed Calls", int(ct.sum())]]
+    colours = {1: eng._excel_3_colour_scale(ct.values, reverse=True)}
+    png = _table_png(["Technician", "Closed Calls"], rows, [name_w, 1.5], "", colour_cols=colours, total_row=True)
+    summary = (f"{franchise.title()} ({executive.title()}): {len(sub)} calls soft closed on {info['date']} "
+               f"by {len(ct)} technicians\n" + _soft_notes(info))
     return png, summary.strip()
 
 
