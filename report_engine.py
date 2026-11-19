@@ -38,7 +38,8 @@ STD_EXCLUDE_REASONS = ["Request soft closure verification",
 # both are normalised, for entries of 6+ letters. Edit this list to change who is excluded.
 EXCLUDE_EXECUTIVES = ["Darma Raju E", "Dharmaraju", "Darmaraju",
                       "Dantuluri Jayanth Varma", "Jayanth",
-                      "Thathastu", "Thathasthu", "Kaveri",
+                      "Tathastu", "Tathasthu", "Thathastu", "Thathasthu", "Thatastu",
+                      "Kaveri", "Kavery", "Kaveeri",
                       "UNASSIGNED", "(no executive)"]
 
 
