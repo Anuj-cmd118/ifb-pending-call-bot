@@ -761,12 +761,9 @@ def load_mandatory(source) -> pd.DataFrame:
     return eng.drop_excluded_executives(df, "BSE Name")
 
 
-def mandatory_appointments(source):
-    """ASM x visit status, with MC % = Visit Done / Grand Total (best first). Returns (png, summary)."""
-    df = load_mandatory(source)
-    if df.empty:
-        return None, "No mandatory appointments left after removing the excluded executives."
-    g = pd.crosstab(df["BSE Name"], df["Visit Status"])
+def _mand_table(df, by, label, who=""):
+    """Visit-status table grouped by `by` (ASM or franchise), MC % = Visit Done / Grand Total, best first."""
+    g = pd.crosstab(df[by], df["Visit Status"])
     for c in MAND_STATUSES:
         if c not in g:
             g[c] = 0
@@ -777,7 +774,7 @@ def mandatory_appointments(source):
     tot = g[MAND_STATUSES + ["Total"]].sum()
     tot_mc = tot["Visit Done"] / tot["Total"]
 
-    headers = ["ASM Name"] + MAND_STATUSES[:3] + ["Visit cancelled", "Visit Done", "Grand Total", "MC %"]
+    headers = [label] + MAND_STATUSES[:3] + ["Visit cancelled", "Visit Done", "Grand Total", "MC %"]
     name_w = max(3.6, 0.13 * max(len(n) for n in g.index) + 0.6)
     widths = [name_w, 1.5, 1.6, 1.6, 1.7, 1.4, 1.6, 1.0]
     blank = lambda v: "" if v == 0 else int(v)
@@ -787,8 +784,31 @@ def mandatory_appointments(source):
     colours = {7: eng._excel_3_colour_scale(g["MC"].values, reverse=True)}
     png = _table_png(headers, rows, widths, "", colour_cols=colours, total_row=True)
     best, worst = g.index[0], g.index[-1]
-    summary = (f"Mandatory appointments: {int(tot['Total'])} calls, {int(tot['Visit Done'])} visits done "
+    summary = (f"{who}Mandatory appointments: {int(tot['Total'])} calls, {int(tot['Visit Done'])} visits done "
                f"(MC {tot_mc*100:.0f}%). Best: {best.title()} {g.loc[best, 'MC']*100:.0f}%. "
                f"Lowest: {worst.title()} {g.loc[worst, 'MC']*100:.0f}%.\n"
                f"MC % = Visit Done / Grand Total.")
     return png, summary
+
+
+def mandatory_appointments(source):
+    """ASM x visit status. source = bytes / path / parsed DataFrame. Returns (png, summary)."""
+    df = source if isinstance(source, pd.DataFrame) else load_mandatory(source)
+    if df.empty:
+        return None, "No mandatory appointments left after removing the excluded executives."
+    return _mand_table(df, "BSE Name", "ASM Name")
+
+
+def mandatory_executives(df):
+    """ASMs in the file with their call counts, most calls first."""
+    return df["BSE Name"].value_counts()
+
+
+def mandatory_franchises(df, executive):
+    """One ASM's franchises x visit status. Returns (png, summary)."""
+    d = df[df["BSE Name"].str.lower() == executive.strip().lower()].copy()
+    if d.empty:
+        return None, f"No mandatory appointments found for {executive.title()}."
+    d["_fr"] = d["Franchise Name"].fillna("(no franchise)").astype(str).str.strip()
+    png, summary = _mand_table(d, "_fr", "Franchise")
+    return png, summary.replace("Mandatory appointments:", f"{executive.title()} - mandatory appointments:", 1)
