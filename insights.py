@@ -17,6 +17,7 @@ import report_engine as eng
 SLA_DAYS = 3                 # a call is an SLA breach when DAYS OLD > this
 CHASE_TOP_N = 10             # how many calls go on the "chase today" list
 MIN_RESPONSES = 20           # CSAT: franchises with fewer responses are not ranked
+CSS_TARGETS = (95, 96)       # "Yet to get X%" columns, in this order
 CSS_TARGET_PCT = 95          # CSS target (whole percent) used by "Yet to get 95%"
 
 # priority points (higher = chase first)
@@ -37,6 +38,8 @@ def detect_report_type(source) -> str:
     raw = pd.read_excel(source, header=None, nrows=6)
     title = str(raw.iloc[0, 0]).lower() if len(raw) else ""
     cols = {str(v).strip() for v in raw.values.ravel() if pd.notna(v)}
+    if "mandatory appointment" in title:
+        return "mandatory"
     if "pending call" in title:
         return "pending"
     if "customer sat" in title:
@@ -45,6 +48,8 @@ def detect_report_type(source) -> str:
         return "softclosure"
     if "calls regist" in title:
         return "registered"
+    if {"Visit Status", "Appt Date-CRM", "BSE Name"} <= cols:
+        return "mandatory"
     if {"DAYS OLD", "Pending Reason", "Spare"} <= cols:
         return "pending"
     if {"FeedBack", "TicketNo"} <= cols:
@@ -288,6 +293,25 @@ def ageing_summary(source, upto=4, standard_filters=True):
     return png, summary
 
 
+def _css_need(h, nh, t, target):
+    """Extra HAPPY responses a row still needs to reach `target`% CSS (0 = already there)."""
+    num = target * t - 100 * (h - nh)
+    return max(0, int(-((-num) // (100 - target))))              # integer ceiling
+
+
+def _need_colour_fn(values):
+    """0 -> green; more needed -> yellow to red (scaled to the largest value in the column)."""
+    vmax = max([int(v) for v in values] + [1])
+
+    def f(v):
+        if v <= 0:
+            return (99 / 255, 190 / 255, 123 / 255)
+        t = min(1.0, v / vmax)
+        a, b = (255, 235, 132), (248, 105, 107)
+        return tuple((a[i] + (b[i] - a[i]) * t) / 255 for i in range(3))
+    return f
+
+
 # ----------------------------------------- CSAT by executive: CSS = (Happy - Not happy) / Total
 def csat_by_executive(source):
     """Executive-wise CSAT. CSS = (HAPPY - NOT HAPPY) / Grand Total, where the total includes OK.
@@ -312,24 +336,34 @@ def csat_by_executive(source):
     tot = g[["HAPPY", "NOT HAPPY", "OK", "Total"]].sum()
     tot_css = (tot["HAPPY"] - tot["NOT HAPPY"]) / tot["Total"]
 
-    headers = ["Row Labels", "HAPPY", "NOT HAPPY", "OK", "Grand Total", "CSS"]
+    needs = {t: [_css_need(r["HAPPY"], r["NOT HAPPY"], r["Total"], t) for _, r in g.iterrows()] for t in CSS_TARGETS}
+    headers = ["Row Labels", "HAPPY", "NOT HAPPY", "OK", "Grand Total", "CSS"] + [f"Yet to get {t}%" for t in CSS_TARGETS]
     name_w = max(3.6, 0.13 * max(len(n) for n in g.index) + 0.6)
-    widths = [name_w, 1.0, 1.3, 0.7, 1.3, 0.9]
+    widths = [name_w, 1.0, 1.3, 0.7, 1.3, 0.9] + [1.9] * len(CSS_TARGETS)
     blank = lambda v: "" if v == 0 else int(v)
     rows = [[n, blank(r["HAPPY"]), blank(r["NOT HAPPY"]), blank(r["OK"]), int(r["Total"]), f"{r['CSS']*100:.0f}%"]
-            for n, r in g.iterrows()]
-    rows.append(["Grand Total", int(tot["HAPPY"]), int(tot["NOT HAPPY"]), int(tot["OK"]), int(tot["Total"]), f"{tot_css*100:.0f}%"])
+            + [needs[t][i] for t in CSS_TARGETS] for i, (n, r) in enumerate(g.iterrows())]
+    need_tot = {t: int(sum(needs[t])) for t in CSS_TARGETS}          # sum of the rows, not recomputed from totals
+    rows.append(["Grand Total", int(tot["HAPPY"]), int(tot["NOT HAPPY"]), int(tot["OK"]), int(tot["Total"]), f"{tot_css*100:.0f}%"]
+                + [need_tot[t] for t in CSS_TARGETS])
     colours = {5: eng._excel_3_colour_scale(g["CSS"].values, reverse=True)}
+    total_colours = {}
+    for k, t in enumerate(CSS_TARGETS):
+        f = _need_colour_fn(needs[t] + [need_tot[t]])
+        colours[6 + k] = [f(v) for v in needs[t]]
+        total_colours[6 + k] = f(need_tot[t])
 
     import re
     src = io.BytesIO(source) if isinstance(source, (bytes, bytearray)) else source
     dates = re.findall(r"\d+/\d+/\d{4}", str(pd.read_excel(src, header=None, nrows=2).iloc[1, 0]))
     period = f" | {dates[0]} to {dates[-1]}" if dates else ""
     title = f"CSS = (Happy - Not happy) / Total incl. OK{period}"
-    png = _table_png(headers, rows, widths, title, colour_cols=colours, total_row=True)
+    png = _table_png(headers, rows, widths, title, colour_cols=colours, total_row=True, total_colours=total_colours)
     low = g.index[0]
+    yet = ", ".join(f"{need_tot[t]} for {t}%" for t in CSS_TARGETS)
     summary = (f"CSS overall {tot_css*100:.0f}% on {int(tot['Total'])} responses. "
-               f"Lowest: {low.title()} {g.loc[low, 'CSS']*100:.0f}%.\nCSS = (Happy - Not happy) / Total incl. OK")
+               f"Lowest: {low.title()} {g.loc[low, 'CSS']*100:.0f}%.\n"
+               f"Extra HAPPY still needed (sum of executives): {yet}.\nCSS = (Happy - Not happy) / Total incl. OK")
     return png, summary
 
 
@@ -362,11 +396,12 @@ def _css_colour(css, target):
     return (248 / 255, 105 / 255, 107 / 255)
 
 
-def csat_franchise_css(source, executive=None, target_pct=CSS_TARGET_PCT):
+def csat_franchise_css(source, executive=None, targets=CSS_TARGETS):
     """Franchise-wise CSS. executive=None -> every franchise; otherwise that executive's franchises.
     CSS = (HAPPY - NOT HAPPY) / Total incl. OK.
-    'Yet to get 95%' = extra HAPPY responses still needed to reach the target (negative = ahead):
-        ceil((target*Total - 100*(HAPPY - NOT HAPPY)) / (100 - target)).
+    'Yet to get X%' = extra HAPPY responses a franchise still needs to reach X% (0 = already there):
+        ceil((X*Total - 100*(HAPPY - NOT HAPPY)) / (100 - X)).
+    The Grand Total of each 'Yet to get' column is the SUM of the franchise rows.
     Rows sorted by CSS, best first. Returns (png, summary)."""
     df, col = _csat_with_exec(source)
     if executive:
@@ -380,51 +415,42 @@ def csat_franchise_css(source, executive=None, target_pct=CSS_TARGET_PCT):
             g[c] = 0
     g["Total"] = g[["HAPPY", "NOT HAPPY", "OK"]].sum(axis=1)
     g["CSS"] = (g["HAPPY"] - g["NOT HAPPY"]) / g["Total"]
-
-    def need(h, nh, t):
-        num = target_pct * t - 100 * (h - nh)
-        return int(-((-num) // (100 - target_pct)))          # integer ceiling
-    g["Need"] = [need(r["HAPPY"], r["NOT HAPPY"], r["Total"]) for _, r in g.iterrows()]
+    for t in targets:
+        g[f"Need{t}"] = [_css_need(r["HAPPY"], r["NOT HAPPY"], r["Total"], t) for _, r in g.iterrows()]
     g = g.reset_index()
     g = g.sort_values(["CSS", "FR"], ascending=[False, True])
 
     tot = g[["HAPPY", "NOT HAPPY", "OK", "Total"]].sum()
     tot_css = (tot["HAPPY"] - tot["NOT HAPPY"]) / tot["Total"]
-    tot_need = need(tot["HAPPY"], tot["NOT HAPPY"], tot["Total"])
-
-    tgt = target_pct / 100
+    need_tot = {t: int(g[f"Need{t}"].sum()) for t in targets}        # sum of the franchise rows
+    main = targets[0]
+    tgt = main / 100
 
     def fmt(v):                     # whole percent, but one decimal when rounding would cross the target line
         p = v * 100
-        return f"{p:.1f}%" if (round(p) >= target_pct > p) else f"{p:.0f}%"
-    headers = ["FR Name", "HAPPY", "NOT HAPPY", "OK", "Grand Total", "CSS", f"Yet to get {target_pct}%"]
+        return f"{p:.1f}%" if (round(p) >= main > p) else f"{p:.0f}%"
+    headers = ["FR Name", "HAPPY", "NOT HAPPY", "OK", "Grand Total", "CSS"] + [f"Yet to get {t}%" for t in targets]
     name_w = max(3.6, 0.13 * max(len(n) for n in g["FR"]) + 0.6)
-    widths = [name_w, 1.0, 1.3, 0.7, 1.3, 0.9, 1.9]
+    widths = [name_w, 1.0, 1.3, 0.7, 1.3, 0.9] + [1.9] * len(targets)
     blank = lambda v: "" if v == 0 else int(v)
-    rows = [[r["FR"], blank(r["HAPPY"]), blank(r["NOT HAPPY"]), blank(r["OK"]), int(r["Total"]),
-             fmt(r["CSS"]), max(0, int(r["Need"]))] for _, r in g.iterrows()]
-    rows.append(["Grand Total", int(tot["HAPPY"]), int(tot["NOT HAPPY"]), int(tot["OK"]), int(tot["Total"]),
-                 fmt(tot_css), max(0, int(tot_need))])
-    shown = [max(0, int(v)) for v in g["Need"].values]
-    vmax = max(shown + [max(0, int(tot_need))])
-
-    def need_colour(v):                      # 0 = already at target -> green; more needed -> yellow to red
-        if v <= 0:
-            return (99 / 255, 190 / 255, 123 / 255)
-        t = min(1.0, v / vmax)
-        a, b = (255, 235, 132), (248, 105, 107)
-        return tuple((a[i] + (b[i] - a[i]) * t) / 255 for i in range(3))
-    colours = {5: [_css_colour(v, tgt) for v in g["CSS"].values], 6: [need_colour(v) for v in shown]}
-    total_colours = {5: _css_colour(tot_css, tgt), 6: need_colour(max(0, int(tot_need)))}
+    rows = [[r["FR"], blank(r["HAPPY"]), blank(r["NOT HAPPY"]), blank(r["OK"]), int(r["Total"]), fmt(r["CSS"])]
+            + [int(r[f"Need{t}"]) for t in targets] for _, r in g.iterrows()]
+    rows.append(["Grand Total", int(tot["HAPPY"]), int(tot["NOT HAPPY"]), int(tot["OK"]), int(tot["Total"]), fmt(tot_css)]
+                + [need_tot[t] for t in targets])
+    colours = {5: [_css_colour(v, tgt) for v in g["CSS"].values]}
+    total_colours = {5: _css_colour(tot_css, tgt)}
+    for k, t in enumerate(targets):
+        f = _need_colour_fn(list(g[f"Need{t}"].values) + [need_tot[t]])
+        colours[6 + k] = [f(int(v)) for v in g[f"Need{t}"].values]
+        total_colours[6 + k] = f(need_tot[t])
     png = _table_png(headers, rows, widths, "", colour_cols=colours, total_row=True, total_colours=total_colours)
 
     who = f"{executive.title()}: " if executive else ""
-    below = int((g["CSS"] * 100 < target_pct).sum())
-    ahead = (f"{-tot_need} responses ahead of {target_pct}%" if tot_need < 0
-             else f"{tot_need} more HAPPY needed to reach {target_pct}%")
+    below = int((g["CSS"] * 100 < main).sum())
+    yet = ", ".join(f"{need_tot[t]} for {t}%" for t in targets)
     summary = (f"{who}CSS {tot_css*100:.1f}% on {int(tot['Total'])} responses across {len(g)} franchises. "
-               f"Below {target_pct}%: {below}. Overall: {ahead}.\n"
-               f"CSS = (Happy - Not happy) / Total incl. OK. Yet to get {target_pct}% = extra HAPPY needed "
+               f"Below {main}%: {below}. Extra HAPPY still needed (sum of franchises): {yet}.\n"
+               f"CSS = (Happy - Not happy) / Total incl. OK. Yet to get X% = extra HAPPY needed per franchise "
                f"(0 = already at target).")
     return png, summary
 
@@ -714,3 +740,55 @@ def franchise_call_lists(source, executive):
     for n in names:
         pages += franchise_call_list(source, executive, n)
     return pages, len(names)
+
+
+# ================================================================ Mandatory appointments
+MAND_STATUSES = ["Future Appt", "Missed Appt", "Today Appt", "Visit cancelled", "Visit Done"]
+
+
+def load_mandatory(source) -> pd.DataFrame:
+    """Mandatory Appointment export: 2 title rows, header on row 3."""
+    if isinstance(source, (bytes, bytearray)):
+        source = io.BytesIO(source)
+    df = pd.read_excel(source, header=2)
+    df.columns = [str(c).strip() for c in df.columns]
+    for need in ("BSE Name", "Visit Status", "Ticket"):
+        if need not in df.columns:
+            raise ValueError(f"column '{need}' not found - is this the Mandatory Appointment report?")
+    df = df[df["Ticket"].notna()].copy()                       # drops blank / total rows
+    df["BSE Name"] = df["BSE Name"].fillna("(no executive)").astype(str).str.strip()
+    df["Visit Status"] = df["Visit Status"].astype(str).str.strip()
+    return eng.drop_excluded_executives(df, "BSE Name")
+
+
+def mandatory_appointments(source):
+    """ASM x visit status, with MC % = Visit Done / Grand Total (best first). Returns (png, summary)."""
+    df = load_mandatory(source)
+    if df.empty:
+        return None, "No mandatory appointments left after removing the excluded executives."
+    g = pd.crosstab(df["BSE Name"], df["Visit Status"])
+    for c in MAND_STATUSES:
+        if c not in g:
+            g[c] = 0
+    g = g[MAND_STATUSES + [c for c in g.columns if c not in MAND_STATUSES]]
+    g["Total"] = g.sum(axis=1)
+    g["MC"] = g["Visit Done"] / g["Total"]
+    g = g.sort_values(["MC", "Total"], ascending=[False, False])
+    tot = g[MAND_STATUSES + ["Total"]].sum()
+    tot_mc = tot["Visit Done"] / tot["Total"]
+
+    headers = ["ASM Name"] + MAND_STATUSES[:3] + ["Visit cancelled", "Visit Done", "Grand Total", "MC %"]
+    name_w = max(3.6, 0.13 * max(len(n) for n in g.index) + 0.6)
+    widths = [name_w, 1.5, 1.6, 1.6, 1.7, 1.4, 1.6, 1.0]
+    blank = lambda v: "" if v == 0 else int(v)
+    rows = [[n] + [blank(r[c]) for c in MAND_STATUSES] + [int(r["Total"]), f"{r['MC']*100:.0f}%"]
+            for n, r in g.iterrows()]
+    rows.append(["Grand Total"] + [int(tot[c]) for c in MAND_STATUSES] + [int(tot["Total"]), f"{tot_mc*100:.0f}%"])
+    colours = {7: eng._excel_3_colour_scale(g["MC"].values, reverse=True)}
+    png = _table_png(headers, rows, widths, "", colour_cols=colours, total_row=True)
+    best, worst = g.index[0], g.index[-1]
+    summary = (f"Mandatory appointments: {int(tot['Total'])} calls, {int(tot['Visit Done'])} visits done "
+               f"(MC {tot_mc*100:.0f}%). Best: {best.title()} {g.loc[best, 'MC']*100:.0f}%. "
+               f"Lowest: {worst.title()} {g.loc[worst, 'MC']*100:.0f}%.\n"
+               f"MC % = Visit Done / Grand Total.")
+    return png, summary
