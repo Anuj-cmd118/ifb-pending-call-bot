@@ -9,8 +9,9 @@ Send an Excel file exported from the portal; the bot detects which report it is.
 
 | File sent | Bot offers |
 |---|---|
-| **Pending call** | **Executive pivot** - executive x days-pending table, colour-coded<br>**Ageing summary** - executive x days 0..N, Grand Total and a ">N Days" column, both colour-scaled<br>**Chase list** - top 10 calls past SLA, ranked by priority<br>**By executive** - one executive's calls broken down franchise-wise |
+| **Pending call** | **Executive pivot** - executive x days-pending table, colour-coded<br>**Ageing summary** - executive x days 0..N, Grand Total and a ">N Days" column, both colour-scaled<br>**Chase list** - top 10 calls past SLA, ranked by priority<br>**By executive** - one executive's calls broken down franchise-wise<br>**Franchise technicians** - one franchise's calls broken down technician-wise<br>**Franchise call lists** - pick an executive; one call-list image per franchise (all pending calls) |
 | **Customer satisfaction score** | **CSS by executive** - HAPPY / NOT HAPPY / OK / Grand Total / CSS, worst first<br>**Executive's franchises** - pick an executive; franchise-wise CSS with a "Yet to get 95%" column<br>**Franchise scorecard** - the 10 lowest by % not happy |
+| **Soft Closure (All Status)** | **Closed: by executive** - calls soft closed on the report day, executive x days taken, Grand Total row = all executives combined<br>**All executives combined** - same, split by call type<br>**Executive's franchises** - pick an executive; franchise x days taken (A to Z) |
 | **Calls Registered** | Recognised; no output yet |
 
 Type `hi` at any time to start over.
@@ -18,6 +19,22 @@ Type `hi` at any time to start over.
 ### Executive pivot
 Asks the age ("more than 2 / 3 days" or a custom number) and whether to apply the
 standard filters, then returns the pivot image with a red-yellow-green Grand Total column.
+
+### Franchise technicians
+Asks the age, then the franchise (the 10 with most calls, or type part of a name; a file that holds only one
+franchise skips the question). Returns technicians x days pending with the same standard filters, ticket
+counting and executive exclusions as the other pending reports, and it also leaves out Mandatory Calls
+(this report only; `TECH_EXTRA_EXCLUDE_TYPES` in `report_engine.py`). At the custom-age prompt, type *all* for every
+pending call (pivot, by executive and franchise technicians).
+
+### Franchise call lists
+Pick an executive (or type a name) and the bot sends one image per franchise, A to Z, in the layout the executive
+makes by hand: Franchise Name, Ticket No, Customer Name, Pincode, Call Type, Product, Machine Status (blank = NA),
+Call Book Date (mm/dd/yyyy), DAYS OLD. Rows are sorted by DAYS OLD high to low, newest booking first within a day.
+Calls 2+ days old are solid red rows; 0 and 1 day are red text on white (`CALL_LIST_RED_FROM` in `insights.py`).
+All pending calls are included (no age limit) with the same standard filters and ticket counting as the other
+pending reports. A franchise with more than 40 calls is split into pages (`CALL_LIST_PAGE_ROWS`).
+The images are sent one after another, so a long list takes a little while on the free Render plan.
 
 ### Chase list
 Asks which age counts as an SLA breach, then ranks calls by priority and shows:
@@ -42,8 +59,14 @@ date range the exported file covers.
 ### Executive's franchises (franchise-wise CSS)
 Pick an executive (or type a name); the report lists that executive's franchises with HAPPY, NOT HAPPY,
 OK, Grand Total and CSS, best first (ties alphabetical). **Yet to get 95%** = extra HAPPY responses still
-needed to reach 95% = 19 x Total - 20 x (HAPPY - NOT HAPPY); a negative number means the franchise is ahead.
+needed to reach 95% = 19 x Total - 20 x (HAPPY - NOT HAPPY); a franchise already at the target shows 0 (green) instead of a negative number.
 CSS cells are green at or above the target and red below it. The target is `CSS_TARGET_PCT` in `insights.py`.
+
+### Soft closure reports
+Days taken = soft closure date - call book date (both read as mm/dd/yyyy). Only calls soft closed on the
+report day (the latest date in the file) are counted, with Courtesy Visit and Mandatory Calls excluded
+(`SOFT_EXCLUDE_TYPES` in `insights.py`). Days 0-9 get their own column; anything longer is grouped as "10+".
+Grand Total is colour-scaled with high = green. This reproduces the franchise x days table the executive makes by hand.
 
 ### CSAT scorecard
 Per franchise: responses, happy %, OK and not-happy counts. Franchises with fewer than
