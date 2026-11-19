@@ -32,6 +32,24 @@ HEAD = {"Authorization": f"Bearer {TOKEN}"}
 app = Flask(__name__)
 sessions = {}          # {phone: {"stage":..., "file": bytes, "min_days": int, ...}}
 seen_ids = set()       # WhatsApp can deliver the same message twice
+SESSION_TTL = 30 * 60  # seconds idle before the uploaded Excel is dropped from memory
+
+
+def _touch(s):
+    s["ts"] = time.time()
+
+
+def _reaper():
+    while True:
+        time.sleep(60)
+        now = time.time()
+        for k in [k for k, v in list(sessions.items()) if now - v.get("ts", now) > SESSION_TTL]:
+            sessions.pop(k, None)
+        if len(seen_ids) > 5000:
+            seen_ids.clear()
+
+
+threading.Thread(target=_reaper, daemon=True).start()
 
 
 # ------------------------------------------------------------ send helpers
@@ -152,14 +170,14 @@ def ask_types(to, s):
 
 def generate(to, s):
     send_text(to, "Generating your report...")
-    png, summary = eng.make_report(s["file"], s["min_days"],
+    png, summary = eng.make_report(s["df"], s["min_days"],
                                    standard_filters=(s["filters"] == "filt_std"))
     send_image(to, png, summary) if png else send_text(to, summary)
     finish(to)
 
 def generate_chase(to, s):
     send_text(to, "Building your chase list...")
-    df = eng.load_report(s["file"])
+    df = s["df"]
     top, breach = ins.build_chase_list(df, s["min_days"])
     if top is None:
         send_text(to, f"No calls older than {s['min_days']} days after the standard filters.")
@@ -175,7 +193,7 @@ def generate_csat(to, s):
     finish(to)
 
 def ask_executive(to, s):
-    ex = eng.list_executives(s["file"], s["min_days"])
+    ex = eng.list_executives(s["df"], s["min_days"])
     if ex.empty:
         send_text(to, f"No {age_phrase(s['min_days'])} after the standard filters.")
         finish(to)
@@ -188,13 +206,13 @@ def ask_executive(to, s):
 
 def generate_exec(to, s, name):
     send_text(to, f"Building {name.title()}'s franchise-wise report...")
-    png, summary = eng.make_report(s["file"], s["min_days"], executive=name)
+    png, summary = eng.make_report(s["df"], s["min_days"], executive=name)
     send_image(to, png, summary + "\n(standard filters applied)") if png else send_text(to, summary)
     finish(to)
 
 def generate_ageing(to, s):
     send_text(to, "Building the ageing summary...")
-    png, summary = ins.ageing_summary(s["file"], s["min_days"])
+    png, summary = ins.ageing_summary(s["df"], s["min_days"])
     send_image(to, png, summary) if png else send_text(to, summary)
     finish(to)
 
@@ -205,7 +223,7 @@ def generate_csat_exec(to, s):
     finish(to)
 
 def ask_list_executive(to, s):
-    ex = eng.list_executives(s["file"], -1)
+    ex = eng.list_executives(s["df"], -1)
     if ex.empty:
         send_text(to, "No pending calls found after the standard filters.")
         finish(to)
@@ -215,16 +233,35 @@ def ask_list_executive(to, s):
     s["stage"] = "lists_pick"
     send_list(to, "Call lists for which executive's franchises? Pick one, or type a name.", "Choose executive", rows)
 
+LPAGE = 8   # 8 franchises + "More" + "Done" = 10 rows (WhatsApp list limit)
+
+def ask_list_franchise(to, s, page=0):
+    names, cnt = s["lfr_names"], s["lfr_counts"]
+    chunk = names[page * LPAGE:(page + 1) * LPAGE]
+    rows = [(f"lfr_{page * LPAGE + i}", n.title()[:24], f"{int(cnt[n])} pending calls")
+            for i, n in enumerate(chunk)]
+    left = len(names) - (page + 1) * LPAGE
+    if left > 0:
+        rows.append((f"lfrpage_{page + 1}", "More franchises >", f"{left} more"))
+    rows.append(("lfr_done", "Done", "Finish"))
+    s["stage"], s["lpage"] = "lists_fran", page
+    send_list(to, f"{s['lexec'].title()}: pick a franchise for its call list (or type part of its name).",
+              "Choose franchise", rows)
+
 def generate_lists(to, s, name):
-    send_text(to, f"Building call lists for {name.title()}'s franchises...")
-    pages, n_fr = ins.franchise_call_lists(s["file"], name)
-    if not pages:
+    fr = ins.call_list_franchises(s["df"], name)
+    if fr.empty:
         send_text(to, f"No pending calls for {name.title()} after the standard filters.")
         finish(to)
         return
-    send_text(to, f"Sending {len(pages)} image{'s' if len(pages) != 1 else ''} for {n_fr} "
-                  f"franchise{'s' if n_fr != 1 else ''}, A to Z. "
-                  "Red rows are 2+ days old; 0 and 1 day are red text. (standard filters applied)")
+    s["lexec"], s["lfr_names"], s["lfr_counts"] = name, list(fr.index), fr
+    ask_list_franchise(to, s, 0)
+
+def generate_list_one(to, s, franchise):
+    send_text(to, f"Building the call list for {franchise.title()}...")
+    pages = ins.franchise_call_list(s["df"], s["lexec"], franchise)
+    if not pages:
+        send_text(to, f"No pending calls for {franchise.title()}.")
     for png, cap in pages:
         try:
             send_image(to, png, cap)
@@ -232,7 +269,7 @@ def generate_lists(to, s, name):
             print("call-list image failed:", repr(e))
             send_text(to, f"Could not send the image for {cap.split(':')[0]}.")
         time.sleep(0.4)
-    finish(to)
+    ask_list_franchise(to, s, s.get("lpage", 0))  # back to the picker; session stays open
 
 def age_phrase(n):
     return "pending calls" if n < 0 else f"calls older than {n} days"
@@ -241,7 +278,7 @@ def desc_age(n):
     return "" if n < 0 else f" past {n} days"
 
 def ask_franchise(to, s):
-    fr = eng.list_franchises(s["file"], s["min_days"])
+    fr = eng.list_franchises(s["df"], s["min_days"])
     if fr.empty:
         send_text(to, f"No {age_phrase(s['min_days'])} after the standard filters.")
         finish(to)
@@ -257,7 +294,7 @@ def ask_franchise(to, s):
 
 def generate_tech(to, s, name):
     send_text(to, f"Building {name.title()}'s technician-wise report...")
-    png, summary = eng.make_report(s["file"], s["min_days"], franchise=name)
+    png, summary = eng.make_report(s["df"], s["min_days"], franchise=name)
     send_image(to, png, summary + "\n(standard filters applied, mandatory calls excluded)") if png else send_text(to, summary)
     finish(to)
 
@@ -284,6 +321,7 @@ def handle(msg):
         send_text(to, "Sorry, this number isn't registered to use the pending call bot.")
         return
     s = sessions.setdefault(to, {"stage": "idle"})
+    _touch(s)
     kind = msg["type"]
 
     # ---- Excel received: detect which report it is
@@ -296,15 +334,17 @@ def handle(msg):
         try:
             data = download_media(doc["id"])
             rtype = ins.detect_report_type(data)
+            df = None
             if rtype == "pending":
-                eng.load_report(data)                     # validate now, not later
+                df = eng.load_report(data)                # parse ONCE; cached for every later click
             elif rtype == "softclosure":
                 ins.load_soft_closure(data)
         except Exception as e:
             send_text(to, f"I couldn't read that file: {e}")
             sessions.pop(to, None)
             return
-        s.clear(); s.update({"file": data, "rtype": rtype})
+        s.clear(); s.update({"file": None if rtype == "pending" else data, "df": df, "rtype": rtype})
+        _touch(s)
         if rtype == "pending":
             s["stage"] = "action"; ask_action(to)
         elif rtype == "csat":
@@ -370,7 +410,7 @@ def handle(msg):
         generate_tech(to, s, s["fr_names"][int(reply.split("_")[1])])
     elif s["stage"] == "fran_pick" and text:
         q = text.lower()
-        names = [n for n in eng.list_franchises(s["file"], s["min_days"]).index if q in n.lower()]
+        names = [n for n in eng.list_franchises(s["df"], s["min_days"]).index if q in n.lower()]
         if len(names) == 1:
             generate_tech(to, s, names[0])
         elif 1 < len(names) <= 6:
@@ -379,11 +419,28 @@ def handle(msg):
             send_text(to, f"{len(names)} franchises match. Type more of the name.")
         else:
             send_text(to, f"No franchise matching '{text}' has {age_phrase(s['min_days'])}. Try another name.")
+    elif s["stage"] == "lists_fran" and reply == "lfr_done":
+        finish(to)
+    elif s["stage"] == "lists_fran" and reply and reply.startswith("lfrpage_"):
+        ask_list_franchise(to, s, int(reply.split("_")[1]))
+    elif s["stage"] == "lists_fran" and reply and reply.startswith("lfr_"):
+        generate_list_one(to, s, s["lfr_names"][int(reply.split("_")[1])])
+    elif s["stage"] == "lists_fran" and text:
+        q = text.lower()
+        names = [n for n in s["lfr_names"] if q in n.lower()]
+        if len(names) == 1:
+            generate_list_one(to, s, names[0])
+        elif 1 < len(names) <= 6:
+            send_text(to, "More than one match: " + ", ".join(n.title() for n in names) + ". Type a fuller name.")
+        elif names:
+            send_text(to, f"{len(names)} franchises match. Type more of the name.")
+        else:
+            send_text(to, f"No franchise matching '{text}'. Try another name, or type *hi* to start over.")
     elif s["stage"] == "lists_pick" and reply and reply.startswith("lexec_"):
         generate_lists(to, s, s["lexec_names"][int(reply.split("_")[1])])
     elif s["stage"] == "lists_pick" and text:
         q = text.lower()
-        names = [n for n in eng.list_executives(s["file"], -1).index if q in n.lower()]
+        names = [n for n in eng.list_executives(s["df"], -1).index if q in n.lower()]
         if len(names) == 1:
             generate_lists(to, s, names[0])
         elif names:
@@ -410,7 +467,7 @@ def handle(msg):
         generate_exec(to, s, s["exec_names"][int(reply.split("_")[1])])
     elif s["stage"] == "exec" and text:
         q = text.lower()
-        names = [n for n in eng.list_executives(s["file"], s["min_days"]).index if q in n.lower()]
+        names = [n for n in eng.list_executives(s["df"], s["min_days"]).index if q in n.lower()]
         if len(names) == 1:
             generate_exec(to, s, names[0])
         elif names:
@@ -427,7 +484,7 @@ def handle(msg):
 
 
 # --------------------------------------------------------------- webhook
-VERSION = "2026-11-19-v11-franchise-call-lists"
+VERSION = "2026-11-19-v12-cached-df-pick-franchise"
 
 @app.get("/version")
 def version():
