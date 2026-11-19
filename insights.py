@@ -542,11 +542,11 @@ def _days_report(df, rowcol, header, order):
     else:
         ct = ct.sort_values("Grand Total", ascending=False)
     total = ct.sum()
-    heads = [header] + [str(c) if c <= SOFT_MAX_DAY else f"{SOFT_MAX_DAY + 1}+" for c in cols] + ["Grand Total"]
+    heads = [header] + [str(c) if c <= SOFT_MAX_DAY else f"{SOFT_MAX_DAY + 1}+" for c in cols] + ["Closed Calls"]
     name_w = max(3.6, 0.13 * max(len(str(n)) for n in ct.index) + 0.6)
     widths = [name_w] + [0.6] * len(cols) + [1.3]
     rows = [[n] + ["" if v == 0 else int(v) for v in r.values[:-1]] + [int(r.values[-1])] for n, r in ct.iterrows()]
-    rows.append(["Grand Total"] + [int(v) for v in total.values])
+    rows.append(["Closed Calls"] + [int(v) for v in total.values])
     colours = {len(cols) + 1: eng._excel_3_colour_scale(ct["Grand Total"].values, reverse=True)}
     png = _table_png(heads, rows, widths, "", colour_cols=colours, total_row=True)
     return png, ct
